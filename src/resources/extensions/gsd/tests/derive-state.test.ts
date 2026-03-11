@@ -618,6 +618,58 @@ Continue from step 2.
     }
   }
 
+  // ═══ Milestone with summary but no roadmap → complete ═══════════════════
+  {
+    console.log('\n=== milestone with summary and no roadmap → complete ===');
+    const base = createFixtureBase();
+    try {
+      // M001, M002: completed milestones with summaries but no roadmaps
+      const m1dir = join(base, '.gsd', 'milestones', 'M001');
+      mkdirSync(m1dir, { recursive: true });
+      writeFileSync(join(m1dir, 'M001-SUMMARY.md'), '---\nid: M001\n---\n# Bootstrap\nDone.');
+
+      const m2dir = join(base, '.gsd', 'milestones', 'M002');
+      mkdirSync(m2dir, { recursive: true });
+      writeFileSync(join(m2dir, 'M002-SUMMARY.md'), '---\nid: M002\n---\n# Core Features\nDone.');
+
+      // M003: active milestone with a roadmap
+      writeRoadmap(base, 'M003', '# M003: Polish\n## Slices\n- [ ] **S01: Cleanup**');
+
+      const state = await deriveState(base);
+
+      assertEq(state.phase, 'planning', 'summary-no-roadmap: phase is planning (active is M003)');
+      assertEq(state.activeMilestone?.id, 'M003', 'summary-no-roadmap: active milestone is M003');
+      assertEq(state.activeMilestone?.title, 'Polish', 'summary-no-roadmap: active title is Polish');
+      assertEq(state.registry.length, 3, 'summary-no-roadmap: registry has 3 entries');
+      assertEq(state.registry[0]?.status, 'complete', 'summary-no-roadmap: M001 is complete');
+      assertEq(state.registry[0]?.title, 'Bootstrap', 'summary-no-roadmap: M001 title from summary');
+      assertEq(state.registry[1]?.status, 'complete', 'summary-no-roadmap: M002 is complete');
+      assertEq(state.registry[1]?.title, 'Core Features', 'summary-no-roadmap: M002 title from summary');
+      assertEq(state.registry[2]?.status, 'active', 'summary-no-roadmap: M003 is active');
+      assertEq(state.progress?.milestones?.done, 2, 'summary-no-roadmap: milestones done = 2');
+      assertEq(state.progress?.milestones?.total, 3, 'summary-no-roadmap: milestones total = 3');
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // ═══ All milestones have summary but no roadmap → complete ═════════════
+  {
+    console.log('\n=== all milestones summary-only → complete ===');
+    const base = createFixtureBase();
+    try {
+      const m1dir = join(base, '.gsd', 'milestones', 'M001');
+      mkdirSync(m1dir, { recursive: true });
+      writeFileSync(join(m1dir, 'M001-SUMMARY.md'), '---\ntitle: Done\n---\nAll done.');
+
+      const state = await deriveState(base);
+      assertEq(state.phase, 'complete', 'all-summary-only: phase is complete');
+      assertEq(state.registry[0]?.status, 'complete', 'all-summary-only: M001 is complete');
+    } finally {
+      cleanup(base);
+    }
+  }
+
   // ═════════════════════════════════════════════════════════════════════════
   // Results
   // ═════════════════════════════════════════════════════════════════════════

@@ -79,7 +79,12 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
   for (const mid of milestoneIds) {
     const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
     const content = roadmapFile ? await loadFile(roadmapFile) : null;
-    if (!content) return mid; // No roadmap yet — milestone is incomplete
+    if (!content) {
+      // No roadmap — but if a summary exists, the milestone is already complete
+      const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
+      if (summaryFile) continue; // completed milestone, skip
+      return mid; // No roadmap and no summary — milestone is incomplete
+    }
     const roadmap = parseRoadmap(content);
     if (!isMilestoneComplete(roadmap)) return mid;
   }
@@ -117,7 +122,12 @@ export async function deriveState(basePath: string): Promise<GSDState> {
   for (const mid of milestoneIds) {
     const rf = resolveMilestoneFile(basePath, mid, "ROADMAP");
     const rc = rf ? await loadFile(rf) : null;
-    if (!rc) continue;
+    if (!rc) {
+      // No roadmap — milestone is complete if it has a summary
+      const sf = resolveMilestoneFile(basePath, mid, "SUMMARY");
+      if (sf) completeMilestoneIds.add(mid);
+      continue;
+    }
     const rmap = parseRoadmap(rc);
     if (!isMilestoneComplete(rmap)) continue;
     const sf = resolveMilestoneFile(basePath, mid, "SUMMARY");
@@ -134,7 +144,18 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
     const content = roadmapFile ? await loadFile(roadmapFile) : null;
     if (!content) {
-      // No roadmap yet — treat as incomplete/active
+      // No roadmap — check if a summary exists (completed milestone without roadmap)
+      const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
+      if (summaryFile) {
+        const summaryContent = await loadFile(summaryFile);
+        const summaryTitle = summaryContent
+          ? (parseSummary(summaryContent).title || mid)
+          : mid;
+        registry.push({ id: mid, title: summaryTitle, status: 'complete' });
+        completeMilestoneIds.add(mid);
+        continue;
+      }
+      // No roadmap and no summary — treat as incomplete/active
       if (!activeMilestoneFound) {
         activeMilestone = { id: mid, title: mid };
         activeMilestoneFound = true;
