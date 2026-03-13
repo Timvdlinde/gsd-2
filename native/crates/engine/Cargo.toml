@@ -18,7 +18,12 @@ dashmap = "6"
 globset = "0.4"
 html-to-markdown-rs = { version = "2", default-features = false }
 ignore = "0.4"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "gif",
+  "webp",
+] }
 napi = { version = "2", features = ["napi8"] }
 napi-derive = "2"
 smallvec = "1"

@@ -9,7 +9,9 @@
  * - highlight: syntect-based syntax highlighting
  * - html: HTML to Markdown conversion
  * - text: ANSI-aware text measurement and slicing
- * - fd: fuzzy file path discovery for autocomplete and @-mention resolution
+ * - fd: fuzzy file path discovery
+ * - image: decode, encode, and resize images
+ for autocomplete and @-mention resolution
  */
 
 export {
@@ -78,3 +80,6 @@ export type {
   FuzzyFindOptions,
   FuzzyFindResult,
 } from "./fd/index.js";
+
+export { parseImage, ImageFormat, SamplingFilter } from "./image/index.js";
+export type { NativeImageHandle } from "./image/index.js";

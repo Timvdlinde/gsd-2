@@ -1,14 +1,14 @@
 {
   "name": "@gsd/native",
   "version": "0.1.0",
-  "description": "Native Rust bindings for GSD — high-performance native modules via N-API",
+  "description": "Native Rust bindings for GSD \u2014 high-performance native modules via N-API",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
     "build:native": "node ../../native/scripts/build.js",
     "build:native:dev": "node ../../native/scripts/build.js --dev",
-    "test": "node --test src/__tests__/grep.test.mjs src/__tests__/ps.test.mjs src/__tests__/glob.test.mjs src/__tests__/clipboard.test.mjs src/__tests__/highlight.test.mjs src/__tests__/html.test.mjs src/__tests__/text.test.mjs src/__tests__/fd.test.mjs"
+    "test": "node --test src/__tests__/grep.test.mjs src/__tests__/ps.test.mjs src/__tests__/glob.test.mjs src/__tests__/clipboard.test.mjs src/__tests__/highlight.test.mjs src/__tests__/html.test.mjs src/__tests__/text.test.mjs src/__tests__/fd.test.mjs src/__tests__/image.test.mjs"
   },
   "exports": {
     ".": {
@@ -46,6 +46,10 @@
     "./fd": {
       "types": "./src/fd/index.ts",
       "import": "./src/fd/index.ts"
+    },
+    "./image": {
+      "types": "./src/image/index.ts",
+      "import": "./src/image/index.ts"
     }
   },
   "files": [
