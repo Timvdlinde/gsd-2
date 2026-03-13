@@ -26,7 +26,7 @@ The GSD extension is fully functional with:
 - **Secrets gate**: `startAuto()` checks `getManifestStatus()` before first dispatch
 - **Disk-driven state**: `.gsd/` files are the source of truth, `STATE.md` is derived cache
 - **File parsing**: `files.ts` has markdown parsers for all GSD file types
-- **Browser-tools**: Single `index.ts` (~5000 lines) with all tool registrations, shared infrastructure in `core.js` (~1000 lines). Uses Playwright for browser control. Accessibility-first state representation, deterministic versioned refs, adaptive DOM settling, compact post-action summaries.
+- **Browser-tools**: Modular structure — slim `index.ts` orchestrator (47 lines), 8 focused infrastructure modules (state.ts, utils.ts, evaluate-helpers.ts, lifecycle.ts, capture.ts, settle.ts, refs.ts), 9 categorized tool files under `tools/`, shared infrastructure in `core.js` (~1000 lines). Browser-side utilities injected once via `addInitScript` under `window.__pi` namespace. Uses Playwright for browser control. Accessibility-first state representation, deterministic versioned refs, adaptive DOM settling, compact post-action summaries.
 - **Prompt templates**: `prompts/` directory with mustache-like `{{var}}` substitution
 - **TUI components**: `@gsd/pi-tui` provides `Editor`, `Text`, key handling, themes
 - **Branch-per-slice**: git branches isolate slice work, squash-merged to main on completion

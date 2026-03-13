@@ -300,7 +300,11 @@ GSD preferences live in `~/.gsd/preferences.md` (global) or `.gsd/preferences.md
 version: 1
 models:
   research: claude-sonnet-4-6
-  planning: claude-opus-4-6
+  planning:
+    model: claude-opus-4-6
+    fallbacks:
+      - openrouter/z-ai/glm-5
+      - openrouter/minimax/minimax-m2.5
   execution: claude-sonnet-4-6
   completion: claude-sonnet-4-6
 skill_discovery: suggest
@@ -316,7 +320,7 @@ budget_ceiling: 50.00
 
 | Setting | What it controls |
 |---------|-----------------|
-| `models.*` | Per-phase model selection (Opus for planning, Sonnet for execution, etc.) |
+| `models.*` | Per-phase model selection — string for a single model, or `{model, fallbacks}` for automatic failover |
 | `skill_discovery` | `auto` / `suggest` / `off` — how GSD finds and applies skills |
 | `auto_supervisor.*` | Timeout thresholds for auto mode supervision |
 | `budget_ceiling` | USD ceiling — auto mode pauses when reached |
@@ -423,12 +427,15 @@ In your preferences (`/gsd prefs`), assign different models to different phases:
 ```yaml
 models:
   research: openrouter/deepseek/deepseek-r1
-  planning: claude-opus-4-6
+  planning:
+    model: claude-opus-4-6
+    fallbacks:
+      - openrouter/z-ai/glm-5
   execution: claude-sonnet-4-6
   completion: claude-sonnet-4-6
 ```
 
-Use expensive models where quality matters (planning, complex execution) and cheaper/faster models where speed matters (research, simple completions). GSD tracks cost per-model so you can see exactly where your budget goes.
+Use expensive models where quality matters (planning, complex execution) and cheaper/faster models where speed matters (research, simple completions). Each phase accepts a simple model string or an object with `model` and `fallbacks` — if the primary model fails (provider outage, rate limit, credit exhaustion), GSD automatically tries the next fallback. GSD tracks cost per-model so you can see exactly where your budget goes.
 
 ---
 

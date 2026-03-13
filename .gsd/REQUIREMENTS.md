@@ -4,28 +4,6 @@ This file is the explicit capability and coverage contract for the project.
 
 ## Active
 
-### R015 — Module decomposition of browser-tools
-- Class: quality-attribute
-- Status: active
-- Description: The monolithic browser-tools index.ts (~5000 lines) is split into focused modules: shared infrastructure, tool groups, and browser-side utilities. All 43 existing tools continue to work identically.
-- Why it matters: A 5000-line file is unmaintainable and makes targeted changes risky. Module boundaries enable safe refactoring and new tool development.
-- Source: user
-- Primary owning slice: M002/S01
-- Supporting slices: none
-- Validation: unmapped
-- Notes: core.js already exists with ~1000 lines of shared utilities. The split extends this pattern.
-
-### R016 — Shared browser-side evaluate utilities
-- Class: quality-attribute
-- Status: active
-- Description: Common functions duplicated across page.evaluate boundaries (cssPath, simpleHash, isVisible, isEnabled, inferRole, accessibleName) are injected once and referenced from all evaluate callbacks.
-- Why it matters: Currently buildRefSnapshot and resolveRefTarget each redeclare ~100 lines of identical utility code. Deduplication reduces payload size, improves maintainability, and ensures consistency.
-- Source: user
-- Primary owning slice: M002/S01
-- Supporting slices: none
-- Validation: unmapped
-- Notes: Options include page.addInitScript or a one-time setup evaluate that attaches to window.
-
 ### R017 — Consolidated state capture per action
 - Class: core-capability
 - Status: active
@@ -137,6 +115,28 @@ This file is the explicit capability and coverage contract for the project.
 - Notes: Test what's unit-testable without a running browser (heuristics, scoring, utility functions). Integration tests with Playwright for tools that need a page.
 
 ## Validated
+
+### R015 — Module decomposition of browser-tools
+- Class: quality-attribute
+- Status: validated
+- Description: The monolithic browser-tools index.ts (~5000 lines) is split into focused modules: shared infrastructure, tool groups, and browser-side utilities. All 43 existing tools continue to work identically.
+- Why it matters: A 5000-line file is unmaintainable and makes targeted changes risky. Module boundaries enable safe refactoring and new tool development.
+- Source: user
+- Primary owning slice: M002/S01
+- Supporting slices: none
+- Validation: Extension loads via jiti, 43 tools register, browser navigate/snapshot/click work against real page, index.ts is 47-line orchestrator with zero registerTool calls, 9 tool files under tools/.
+- Notes: core.js already exists with ~1000 lines of shared utilities. The split extends this pattern.
+
+### R016 — Shared browser-side evaluate utilities
+- Class: quality-attribute
+- Status: validated
+- Description: Common functions duplicated across page.evaluate boundaries (cssPath, simpleHash, isVisible, isEnabled, inferRole, accessibleName) are injected once and referenced from all evaluate callbacks.
+- Why it matters: Currently buildRefSnapshot and resolveRefTarget each redeclare ~100 lines of identical utility code. Deduplication reduces payload size, improves maintainability, and ensures consistency.
+- Source: user
+- Primary owning slice: M002/S01
+- Supporting slices: none
+- Validation: window.__pi contains all 9 functions, survives navigation, refs.ts has zero inline redeclarations, close/reopen re-injects via addInitScript correctly.
+- Notes: Uses context.addInitScript under window.__pi namespace.
 
 ### R001 — Secret forecasting during milestone planning
 - Class: core-capability
@@ -336,8 +336,8 @@ This file is the explicit capability and coverage contract for the project.
 | R012 | operability | deferred | none | none | unmapped |
 | R013 | anti-feature | out-of-scope | none | none | n/a |
 | R014 | anti-feature | out-of-scope | none | none | n/a |
-| R015 | quality-attribute | active | M002/S01 | none | unmapped |
-| R016 | quality-attribute | active | M002/S01 | none | unmapped |
+| R015 | quality-attribute | validated | M002/S01 | none | jiti load, 43 tools register, slim index, browser spot-check |
+| R016 | quality-attribute | validated | M002/S01 | none | window.__pi injection, zero inline redeclarations, survives navigation |
 | R017 | core-capability | active | M002/S02 | M002/S01 | unmapped |
 | R018 | core-capability | active | M002/S02 | none | unmapped |
 | R019 | core-capability | active | M002/S02 | none | unmapped |
@@ -353,8 +353,8 @@ This file is the explicit capability and coverage contract for the project.
 
 ## Coverage Summary
 
-- Active requirements: 12
-- Validated requirements: 10
+- Active requirements: 10
+- Validated requirements: 12
 - Deferred requirements: 3
 - Out of scope: 3
-- Unmapped active requirements: 12
+- Unmapped active requirements: 10
