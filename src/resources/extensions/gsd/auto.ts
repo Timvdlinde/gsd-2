@@ -836,6 +836,24 @@ export async function handleAgentEnd(
     } catch {
       // Non-fatal
     }
+
+    // ── Path A fix: verify artifact and persist completion before re-entering dispatch ──
+    // After doctor + rebuildState, check whether the just-completed unit actually
+    // produced its expected artifact. If so, persist the completion key now so the
+    // idempotency check at the top of dispatchNextUnit() skips it — even if
+    // deriveState() still returns this unit as active (e.g. branch mismatch).
+    try {
+      if (verifyExpectedArtifact(currentUnit.type, currentUnit.id, basePath)) {
+        const completionKey = `${currentUnit.type}/${currentUnit.id}`;
+        if (!completedKeySet.has(completionKey)) {
+          persistCompletedKey(basePath, completionKey);
+          completedKeySet.add(completionKey);
+        }
+        invalidateStateCache();
+      }
+    } catch {
+      // Non-fatal — worst case we fall through to normal dispatch which has its own checks
+    }
   }
 
   // ── Post-unit hooks: check if a configured hook should run before normal dispatch ──
@@ -1391,6 +1409,9 @@ async function dispatchNextUnit(
 
   // Clear stale directory listing cache so deriveState sees fresh disk state (#431)
   clearPathCache();
+  // Clear parsed roadmap/plan cache — doctor may have re-populated it with
+  // stale data between handleAgentEnd and this dispatch call (Path B fix).
+  clearParseCache();
 
   let state = await deriveState(basePath);
   let mid = state.activeMilestone?.id;
