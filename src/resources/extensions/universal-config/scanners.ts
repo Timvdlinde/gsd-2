@@ -191,8 +191,8 @@ async function scanClaude(projectRoot: string, home: string, tool: ToolInfo): Pr
     }
   }
 
-  // Project-level MCP: .claude/.mcp.json or .claude/mcp.json
-  for (const relPath of [".claude/.mcp.json", ".claude/mcp.json"]) {
+  // Project-level MCP: .mcp.json (standard), .claude/.mcp.json, or .claude/mcp.json
+  for (const relPath of [".mcp.json", ".claude/.mcp.json", ".claude/mcp.json"]) {
     const fullPath = join(projectRoot, relPath);
     const content = await readTextFile(fullPath);
     if (content) {
