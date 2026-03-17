@@ -23,7 +23,7 @@ import { StringEnum } from "@gsd/pi-ai";
 import { type ExtensionAPI, getMarkdownTheme } from "@gsd/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@gsd/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { parseBundledExtensionPaths } from "../shared/bundled-extension-paths.js";
+import { parseBundledExtensionPaths } from "../../../bundled-extension-paths.js";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.js";
 import {
 	type IsolationEnvironment,
