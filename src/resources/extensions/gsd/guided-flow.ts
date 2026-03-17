@@ -30,6 +30,7 @@ import { detectProjectState } from "./detection.js";
 import { showProjectInit, offerMigration } from "./init-wizard.js";
 import { showConfirm } from "../shared/confirm-ui.js";
 import { loadQueueOrder, sortByQueueOrder, saveQueueOrder } from "./queue-order.js";
+import { debugLog } from "./debug-logger.js";
 
 // ─── Commit Instruction Helpers ──────────────────────────────────────────────
 
@@ -148,8 +149,9 @@ export function checkAutoStartAfterDiscuss(): boolean {
 
   pendingAutoStart = null;
   startAuto(ctx, pi, basePath, false, { step }).catch((err) => {
-    ctx.ui.notify(`Auto-start failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+    ctx.ui.notify(`Auto-start failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     if (process.env.GSD_DEBUG) console.error('[gsd] auto start error:', err);
+    debugLog("auto-start-failed", { error: err instanceof Error ? err.message : String(err) });
   });
   return true;
 }
