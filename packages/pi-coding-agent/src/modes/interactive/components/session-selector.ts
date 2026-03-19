@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
-import * as os from "node:os";
 import {
 	type Component,
 	Container,
@@ -17,6 +16,7 @@ import {
 import { KeybindingsManager } from "../../../core/keybindings.js";
 import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.js";
 import { theme } from "../theme/theme.js";
+import { shortenPath } from "../utils/shorten-path.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { appKey, appKeyHint, keyHint } from "./keybinding-hints.js";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.js";
@@ -28,15 +28,6 @@ import {
 } from "./tree-render-utils.js";
 
 type SessionScope = "current" | "all";
-
-function shortenPath(path: string): string {
-	const home = os.homedir();
-	if (!path) return path;
-	if (path.startsWith(home)) {
-		return `~${path.slice(home.length)}`;
-	}
-	return path;
-}
 
 function formatSessionDate(date: Date): string {
 	const now = new Date();
