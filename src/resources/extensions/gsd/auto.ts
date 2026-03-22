@@ -988,7 +988,7 @@ export async function startAuto(
   }
 
 
-  if (freshStartAssessment.classification !== "running" && freshStartAssessment.lock) {
+  if (freshStartAssessment.lock) {
     clearLock(base);
   }
 
