@@ -440,7 +440,7 @@ export function detectProjectSignals(basePath: string): ProjectSignals {
   const springBootBuildFiles = scannedFiles.filter((file) =>
     file.endsWith("pom.xml") || file.endsWith("build.gradle") || file.endsWith("build.gradle.kts"),
   );
-  const springBootVersionCatalogs = scannedFiles.filter((file) => file.endsWith("libs.versions.toml"));
+  const springBootVersionCatalogs = scannedFiles.filter((file) => file.endsWith(".versions.toml"));
   if (containsSpringBootMarker(basePath, springBootBuildFiles, springBootVersionCatalogs)) {
     pushUnique(detectedFiles, "dep:spring-boot");
     if (!primaryLanguage) {
@@ -777,8 +777,9 @@ function isPythonRequirementsFile(relativePath: string): boolean {
   const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
   return (
     basename === "requirements.txt" ||
-    /^requirements([-.].+)?\.txt$/i.test(basename) ||
-    /\/requirements\/[^/]+\.txt$/i.test(normalized)
+    basename === "requirements.in" ||
+    /^requirements([-.].+)?\.(txt|in)$/i.test(basename) ||
+    /(^|\/)requirements\/[^/]+\.(txt|in)$/i.test(normalized)
   );
 }
 
@@ -812,6 +813,7 @@ function containsSpringBootMarker(
 ): boolean {
   const usedPluginAliases = new Set<string>();
   const usedLibraryAliases = new Set<string>();
+  const catalogAccessors = new Set(versionCatalogFiles.map(versionCatalogAccessorName).filter(Boolean));
 
   for (const relativePath of buildFiles) {
     try {
@@ -822,15 +824,17 @@ function containsSpringBootMarker(
       }
 
       const normalized = content.toLowerCase();
-      const aliasRe = /alias\(\s*libs\.plugins\.([a-z0-9_.-]+)\s*\)/gi;
       let match: RegExpExecArray | null;
-      while ((match = aliasRe.exec(normalized)) !== null) {
-        usedPluginAliases.add(normalizePluginAlias(match[1]));
-      }
+      for (const accessor of catalogAccessors) {
+        const aliasRe = new RegExp(`alias\\(\\s*${accessor}\\.plugins\\.([a-z0-9_.-]+)\\s*\\)`, "gi");
+        while ((match = aliasRe.exec(normalized)) !== null) {
+          usedPluginAliases.add(normalizePluginAlias(match[1]));
+        }
 
-      const libraryAliasRe = /\blibs\.((?!plugins\b)[a-z0-9_.-]+)/gi;
-      while ((match = libraryAliasRe.exec(normalized)) !== null) {
-        usedLibraryAliases.add(normalizePluginAlias(match[1]));
+        const libraryAliasRe = new RegExp(`\\b${accessor}\\.((?!plugins\\b)[a-z0-9_.-]+)`, "gi");
+        while ((match = libraryAliasRe.exec(normalized)) !== null) {
+          usedLibraryAliases.add(normalizePluginAlias(match[1]));
+        }
       }
     } catch {
       // unreadable build file — continue scanning others
@@ -901,7 +905,7 @@ function stripDependencyComments(relativePath: string, content: string): string 
   if (relativePath.endsWith("pyproject.toml")) {
     return content.replace(/(^|\s)#.*$/gm, "");
   }
-  if (relativePath.endsWith("libs.versions.toml")) {
+  if (relativePath.endsWith(".versions.toml")) {
     return content.replace(/(^|\s)#.*$/gm, "");
   }
   if (relativePath.endsWith("pom.xml")) {
@@ -1043,6 +1047,12 @@ function normalizePackageName(name: string): string {
 
 function normalizePluginAlias(alias: string): string {
   return alias.toLowerCase().replace(/[-_]/g, ".");
+}
+
+function versionCatalogAccessorName(relativePath: string): string {
+  const normalized = relativePath.replaceAll("\\", "/");
+  const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+  return basename.replace(/\.versions\.toml$/i, "").toLowerCase();
 }
 
 function scanProjectFiles(basePath: string): string[] {

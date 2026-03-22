@@ -864,6 +864,31 @@ test("detectProjectSignals: FastAPI direct reference with @ emits dep:fastapi", 
   }
 });
 
+test("detectProjectSignals: FastAPI detected via requirements.in", () => {
+  const dir = makeTempDir("signals-fastapi-requirements-in");
+  try {
+    writeFileSync(join(dir, "requirements.in"), "fastapi>=0.115\n", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("dep:fastapi"), "requirements.in should trigger FastAPI detection");
+    assert.ok(signals.detectedFiles.includes("requirements.txt"), "requirements.in should normalize to requirements.txt marker");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: FastAPI detected via nested requirements/base.in", () => {
+  const dir = makeTempDir("signals-fastapi-requirements-dir-in");
+  try {
+    mkdirSync(join(dir, "requirements"), { recursive: true });
+    writeFileSync(join(dir, "requirements", "base.in"), "fastapi>=0.115\n", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("dep:fastapi"), "requirements/base.in should trigger FastAPI detection");
+    assert.ok(signals.detectedFiles.includes("requirements.txt"), "requirements/base.in should normalize to requirements.txt marker");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("detectProjectSignals: FastAPI comments do not trigger dep:fastapi", () => {
   const dir = makeTempDir("signals-fastapi-comment");
   try {
@@ -1151,6 +1176,23 @@ test("detectProjectSignals: Spring Boot version-catalog bundle alias emits dep:s
     );
     const signals = detectProjectSignals(dir);
     assert.ok(signals.detectedFiles.includes("dep:spring-boot"), "Spring Boot bundle aliases should trigger detection");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Spring Boot custom version-catalog accessor emits dep:spring-boot", () => {
+  const dir = makeTempDir("signals-spring-version-catalog-custom-accessor");
+  try {
+    mkdirSync(join(dir, "gradle"), { recursive: true });
+    writeFileSync(join(dir, "build.gradle.kts"), "plugins { alias(backend.plugins.web) }", "utf-8");
+    writeFileSync(
+      join(dir, "gradle", "backend.versions.toml"),
+      "[plugins]\nweb = { id = 'org.springframework.boot', version = '3.2.0' }\n",
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("dep:spring-boot"), "custom version-catalog accessors should trigger Spring Boot detection");
   } finally {
     cleanup(dir);
   }
