@@ -134,5 +134,5 @@ test("guided-flow source uses step-aware resume and clears stale paused metadata
   assert.ok(source.includes('step: interrupted.pausedSession?.stepMode ?? false'));
   assert.ok(source.includes('unlinkSync(join(gsdRoot(basePath), "runtime", "paused-session.json"))'));
   assert.ok(source.includes('pendingAutoStart = { ctx, pi, basePath, milestoneId: mid, step: false };'));
-  assert.ok(source.includes('pendingAutoStart = { ctx, pi, basePath, milestoneId: nextId, step: true };'));
+  assert.ok(source.includes('pendingAutoStart = { ctx, pi, basePath, milestoneId: nextId, step: false };'));
 });

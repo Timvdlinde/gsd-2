@@ -29,6 +29,8 @@ export interface PausedSessionMetadata {
   stepMode?: boolean;
   pausedAt?: string;
   sessionFile?: string | null;
+  unitType?: string;
+  unitId?: string;
 }
 
 export interface InterruptedSessionAssessment {

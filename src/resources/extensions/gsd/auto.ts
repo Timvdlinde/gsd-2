@@ -731,6 +731,8 @@ export async function pauseAuto(
       stepMode: s.stepMode,
       pausedAt: new Date().toISOString(),
       sessionFile: s.pausedSessionFile,
+      unitType: s.currentUnit?.type ?? undefined,
+      unitId: s.currentUnit?.id ?? undefined,
     };
     const runtimeDir = join(gsdRoot(s.originalBasePath || s.basePath), "runtime");
     mkdirSync(runtimeDir, { recursive: true });
@@ -968,10 +970,12 @@ export async function startAuto(
           s.originalBasePath = meta.originalBasePath || base;
           s.stepMode = meta.stepMode ?? requestedStepMode;
           s.pausedSessionFile = meta.sessionFile ?? null;
+          s.pausedUnitType = meta.unitType ?? null;
+          s.pausedUnitId = meta.unitId ?? null;
           s.paused = true;
           try { unlinkSync(pausedPath); } catch { /* non-fatal */ }
           ctx.ui.notify(
-            `Resuming paused session for ${meta.milestoneId}${meta.worktreePath ? ` (worktree)` : ""}.`,
+            `Resuming paused session for ${meta.milestoneId}${meta.worktreePath && existsSync(meta.worktreePath) ? ` (worktree)` : ""}.`,
             "info",
           );
         } else if (existsSync(pausedPath)) {
@@ -1024,6 +1028,7 @@ export async function startAuto(
     s.cmdCtx = ctx;
     s.basePath = base;
     s.autoStartTime = Date.now();
+    s.resourceVersionOnStart = readResourceVersion();
     s.originalModelId = ctx.model?.id ?? null;
     s.originalModelProvider = ctx.model?.provider ?? null;
     if (ctx.model) {
@@ -1033,6 +1038,12 @@ export async function startAuto(
     s.unitLifetimeDispatches.clear();
     if (!getLedger()) initMetrics(base);
     if (s.currentMilestoneId) setActiveMilestoneId(base, s.currentMilestoneId);
+
+    // Re-register health level notification callback lost across process restart
+    setLevelChangeCallback((_from, to, summary) => {
+      const level = to === "red" ? "error" : to === "yellow" ? "warning" : "info";
+      ctx.ui.notify(summary, level as "info" | "warning" | "error");
+    });
 
     // ── Auto-worktree: re-enter worktree on resume ──
     if (
@@ -1084,8 +1095,8 @@ export async function startAuto(
       const activityDir = join(gsdRoot(s.basePath), "activity");
       const recovery = synthesizeCrashRecovery(
         s.basePath,
-        s.currentUnit?.type ?? "unknown",
-        s.currentUnit?.id ?? "unknown",
+        s.currentUnit?.type ?? s.pausedUnitType ?? "unknown",
+        s.currentUnit?.id ?? s.pausedUnitId ?? "unknown",
         s.pausedSessionFile ?? undefined,
         activityDir,
       );
