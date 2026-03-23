@@ -11,8 +11,9 @@
  */
 
 import type { ExtensionContext, ExtensionAPI } from "@gsd/pi-coding-agent";
-import { loadFile, parsePlan } from "./files.js";
 import { resolveSliceFile, resolveSlicePath } from "./paths.js";
+import { isDbAvailable, getTask } from "./gsd-db.js";
+import { createRequire } from "node:module";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   runVerificationGate,
@@ -64,13 +65,25 @@ export async function runPostUnitVerification(
     let taskPlanVerify: string | undefined;
     if (parts.length >= 3) {
       const [mid, sid, tid] = parts;
-      const planFile = resolveSliceFile(s.basePath, mid, sid, "PLAN");
-      if (planFile) {
-        const planContent = await loadFile(planFile);
-        if (planContent) {
-          const slicePlan = parsePlan(planContent);
-          const taskEntry = slicePlan?.tasks?.find((t) => t.id === tid);
-          taskPlanVerify = taskEntry?.verify;
+      if (isDbAvailable()) {
+        taskPlanVerify = getTask(mid, sid, tid)?.verify;
+      } else {
+        // Disk fallback: lazy-load parsePlan + loadFile
+        const planFile = resolveSliceFile(s.basePath, mid, sid, "PLAN");
+        if (planFile) {
+          const req = createRequire(import.meta.url);
+          let filesModule: { loadFile: (p: string) => Promise<string | null>; parsePlan: (c: string) => { tasks?: { id: string; verify?: string }[] } };
+          try {
+            filesModule = req("./files.ts");
+          } catch {
+            filesModule = req("./files.js");
+          }
+          const planContent = await filesModule.loadFile(planFile);
+          if (planContent) {
+            const slicePlan = filesModule.parsePlan(planContent);
+            const taskEntry = slicePlan?.tasks?.find((t) => t.id === tid);
+            taskPlanVerify = taskEntry?.verify;
+          }
         }
       }
     }

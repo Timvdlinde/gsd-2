@@ -62,6 +62,12 @@ Migrate the remaining hot-path parser callers to DB queries. Three files, each w
 - `src/resources/extensions/gsd/parallel-eligibility.ts` — 233-line file, `parseRoadmap()` + `parsePlan()` in `collectTouchedFiles()`
 - `src/resources/extensions/gsd/gsd-db.ts` — `isDbAvailable()`, `getMilestoneSlices()`, `getSliceTasks()`, `getTask()`
 
+## Observability Impact
+
+- **Signals changed:** `isDbAvailable()` gate in each migrated caller emits `process.stderr.write` diagnostic when DB is unavailable, making fallback events visible in auto-mode logs.
+- **Inspection:** Future agents can confirm migration by `rg 'parseRoadmap|parsePlan' <file>` returning zero matches. DB queries are visible in SQLite `slices`/`tasks` tables.
+- **Failure visibility:** All three files fall back to disk parsing when DB is not open — no hard failures from DB unavailability. Disk-parse fallback is silent (same behavior as before migration).
+
 ## Expected Output
 
 - `src/resources/extensions/gsd/auto-dispatch.ts` — 3 rules migrated to DB queries

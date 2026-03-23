@@ -6,9 +6,10 @@
  */
 
 import { deriveState } from "./state.js";
-import { parseRoadmap, parsePlan, loadFile } from "./files.js";
 import { resolveMilestoneFile, resolveSliceFile } from "./paths.js";
 import { findMilestoneIds } from "./guided-flow.js";
+import { isDbAvailable, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
+import { createRequire } from "node:module";
 import type { MilestoneRegistryEntry } from "./types.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -36,25 +37,54 @@ async function collectTouchedFiles(
   basePath: string,
   milestoneId: string,
 ): Promise<string[]> {
-  const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-  if (!roadmapPath) return [];
-
-  const roadmapContent = await loadFile(roadmapPath);
-  if (!roadmapContent) return [];
-
-  const roadmap = parseRoadmap(roadmapContent);
   const files = new Set<string>();
 
-  for (const slice of roadmap.slices) {
-    const planPath = resolveSliceFile(basePath, milestoneId, slice.id, "PLAN");
-    if (!planPath) continue;
+  if (isDbAvailable()) {
+    // DB path: query slices and their tasks for file lists
+    const slices = getMilestoneSlices(milestoneId);
+    for (const slice of slices) {
+      const tasks = getSliceTasks(milestoneId, slice.id);
+      for (const task of tasks) {
+        if (Array.isArray(task.files)) {
+          for (const f of task.files) {
+            files.add(f);
+          }
+        }
+      }
+    }
+  } else {
+    // Disk fallback: lazy-load parsers
+    const req = createRequire(import.meta.url);
+    let filesModule: {
+      loadFile: (p: string) => Promise<string | null>;
+      parseRoadmap: (c: string) => { slices: { id: string }[] };
+      parsePlan: (c: string) => { filesLikelyTouched: string[] };
+    };
+    try {
+      filesModule = req("./files.ts");
+    } catch {
+      filesModule = req("./files.js");
+    }
 
-    const planContent = await loadFile(planPath);
-    if (!planContent) continue;
+    const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+    if (!roadmapPath) return [];
 
-    const plan = parsePlan(planContent);
-    for (const f of plan.filesLikelyTouched) {
-      files.add(f);
+    const roadmapContent = await filesModule.loadFile(roadmapPath);
+    if (!roadmapContent) return [];
+
+    const roadmap = filesModule.parseRoadmap(roadmapContent);
+
+    for (const slice of roadmap.slices) {
+      const planPath = resolveSliceFile(basePath, milestoneId, slice.id, "PLAN");
+      if (!planPath) continue;
+
+      const planContent = await filesModule.loadFile(planPath);
+      if (!planContent) continue;
+
+      const plan = filesModule.parsePlan(planContent);
+      for (const f of plan.filesLikelyTouched) {
+        files.add(f);
+      }
     }
   }
 
