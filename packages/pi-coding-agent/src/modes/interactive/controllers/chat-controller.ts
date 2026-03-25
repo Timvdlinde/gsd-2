@@ -210,18 +210,7 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 					host.ui,
 				);
 				component.setExpanded(host.toolOutputExpanded);
-
-				// For external tool execution: insert tool components before the
-				// last message component so tools render above the text response.
-				// The last child is the message that just finished streaming.
-				const children = host.chatContainer.children;
-				const lastChild = children.length > 0 ? children[children.length - 1] : undefined;
-				if (lastChild instanceof AssistantMessageComponent && !host.streamingComponent) {
-					host.chatContainer.insertChildBefore(component, lastChild);
-				} else {
-					host.chatContainer.addChild(component);
-				}
-
+				host.chatContainer.addChild(component);
 				host.pendingTools.set(event.toolCallId, component);
 				host.ui.requestRender();
 			}
