@@ -15,7 +15,6 @@ import type { UatType } from "./files.js";
 import { loadFile, extractUatType, loadActiveOverrides } from "./files.js";
 import { isDbAvailable, getMilestoneSlices, getPendingGates, markAllGatesOmitted } from "./gsd-db.js";
 import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
-import { extractUatType } from "./files.js";
 
 import {
   resolveMilestoneFile,
