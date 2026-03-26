@@ -1295,6 +1295,24 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
   }
 
   const slicePlan = parsePlan(slicePlanContent);
+
+  // ── Reconcile stale task status for filesystem-based projects (#2514) ──
+  // Heading-style tasks (### T01:) are always parsed as done=false by
+  // parsePlan because the heading syntax has no checkbox. When the agent
+  // writes a SUMMARY file but the plan's heading isn't converted to a
+  // checkbox, the task appears incomplete forever — causing infinite
+  // re-dispatch. Reconcile by checking SUMMARY files on disk.
+  for (const t of slicePlan.tasks) {
+    if (t.done) continue;
+    const summaryPath = resolveTaskFile(basePath, activeMilestone.id, activeSlice.id, t.id, "SUMMARY");
+    if (summaryPath && existsSync(summaryPath)) {
+      t.done = true;
+      process.stderr.write(
+        `gsd-reconcile: task ${activeMilestone.id}/${activeSlice.id}/${t.id} has SUMMARY on disk but plan shows incomplete — marking done (#2514)\n`,
+      );
+    }
+  }
+
   const taskProgress = {
     done: slicePlan.tasks.filter(t => t.done).length,
     total: slicePlan.tasks.length,
