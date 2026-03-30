@@ -16,7 +16,8 @@ import { agentDir, sessionsDir, authFilePath } from './app-paths.js'
 import { initResources, buildResourceLoader, getNewerManagedResourceVersion } from './resource-loader.js'
 import { ensureManagedTools } from './tool-bootstrap.js'
 import { loadStoredEnvKeys } from './wizard.js'
-import { getPiDefaultModelAndProvider, migratePiCredentials } from './pi-migration.js'
+import { migratePiCredentials } from './pi-migration.js'
+import { validateConfiguredModel } from './startup-model-validation.js'
 import { shouldRunOnboarding, runOnboarding } from './onboarding.js'
 import chalk from 'chalk'
 import { checkForUpdates } from './update-check.js'
@@ -133,21 +134,6 @@ const isPrintMode = cliFlags.print || cliFlags.mode !== undefined
 
 // Early resource-skew check — must run before TTY gate so version mismatch
 // errors surface even in non-TTY environments.
-exitIfManagedResourcesAreNewer(agentDir)
-
-// Early TTY check — must come before heavy initialization to avoid dangling
-// handles that prevent process.exit() from completing promptly.
-const hasSubcommand = cliFlags.messages.length > 0
-if (!process.stdin.isTTY && !isPrintMode && !hasSubcommand && !cliFlags.listModels && !cliFlags.web) {
-  process.stderr.write('[gsd] Error: Interactive mode requires a terminal (TTY).\n')
-  process.stderr.write('[gsd] Non-interactive alternatives:\n')
-  process.stderr.write('[gsd]   gsd --print "your message"     Single-shot prompt\n')
-  process.stderr.write('[gsd]   gsd --mode rpc                 JSON-RPC over stdin/stdout\n')
-  process.stderr.write('[gsd]   gsd --mode mcp                 MCP server over stdin/stdout\n')
-  process.stderr.write('[gsd]   gsd --mode text "message"      Text output mode\n')
-  process.exit(1)
-}
-
 async function ensureRtkBootstrap(): Promise<void> {
   if ((ensureRtkBootstrap as { _done?: boolean })._done) return
 
@@ -168,6 +154,29 @@ async function ensureRtkBootstrap(): Promise<void> {
   if (!rtkStatus.available && rtkStatus.supported && rtkStatus.enabled && rtkStatus.reason) {
     process.stderr.write(`[gsd] Warning: RTK unavailable — continuing without shell-command compression (${rtkStatus.reason}).\n`)
   }
+}
+
+// `gsd update` — update to the latest version via npm
+if (cliFlags.messages[0] === 'update') {
+  const { runUpdate } = await import('./update-cmd.js')
+  await runUpdate()
+  process.exit(0)
+}
+
+exitIfManagedResourcesAreNewer(agentDir)
+
+// Early TTY check — must come before heavy initialization to avoid dangling
+// handles that prevent process.exit() from completing promptly.
+const hasSubcommand = cliFlags.messages.length > 0
+if (!process.stdin.isTTY && !isPrintMode && !hasSubcommand && !cliFlags.listModels && !cliFlags.web) {
+  process.stderr.write('[gsd] Error: Interactive mode requires a terminal (TTY).\n')
+  process.stderr.write('[gsd] Non-interactive alternatives:\n')
+  process.stderr.write('[gsd]   gsd auto                       Auto-mode (pipeable, no TUI)\n')
+  process.stderr.write('[gsd]   gsd --print "your message"     Single-shot prompt\n')
+  process.stderr.write('[gsd]   gsd --mode rpc                 JSON-RPC over stdin/stdout\n')
+  process.stderr.write('[gsd]   gsd --mode mcp                 MCP server over stdin/stdout\n')
+  process.stderr.write('[gsd]   gsd --mode text "message"      Text output mode\n')
+  process.exit(1)
 }
 
 // `gsd <subcommand> --help` — show subcommand-specific help
@@ -196,13 +205,6 @@ if (cliFlags.messages[0] === 'config') {
   const authStorage = AuthStorage.create(authFilePath)
   loadStoredEnvKeys(authStorage)
   await runOnboarding(authStorage)
-  process.exit(0)
-}
-
-// `gsd update` — update to the latest version via npm
-if (cliFlags.messages[0] === 'update') {
-  const { runUpdate } = await import('./update-cmd.js')
-  await runUpdate()
   process.exit(0)
 }
 
@@ -300,6 +302,23 @@ if (cliFlags.messages[0] === 'headless') {
   process.exit(0)
 }
 
+// `gsd auto [args...]` — shorthand for `gsd headless auto [args...]` (#2732)
+// Without this, `gsd auto` falls through to the interactive TUI which hangs
+// when stdin/stdout are piped (non-TTY environments).
+if (cliFlags.messages[0] === 'auto') {
+  await ensureRtkBootstrap()
+  const { runHeadless, parseHeadlessArgs } = await import('./headless.js')
+  // Rewrite argv so parseHeadlessArgs sees: [node, gsd, headless, auto, ...rest]
+  const rewrittenArgv = [
+    process.argv[0],
+    process.argv[1],
+    'headless',
+    ...cliFlags.messages,   // ['auto', ...extra args]
+  ]
+  await runHeadless(parseHeadlessArgs(rewrittenArgv))
+  process.exit(0)
+}
+
 // Pi's tool bootstrap can mis-detect already-installed fd/rg on some systems
 // because spawnSync(..., ["--version"]) returns EPERM despite a zero exit code.
 // Provision local managed binaries first so Pi sees them without probing PATH.
@@ -391,42 +410,6 @@ if (cliFlags.listModels !== undefined) {
   process.exit(0)
 }
 
-// Validate configured model on startup — catches stale settings from prior installs
-// (e.g. grok-2 which no longer exists) and fresh installs with no settings.
-// Only resets the default when the configured model no longer exists in the registry;
-// never overwrites a valid user choice.
-const configuredProvider = settingsManager.getDefaultProvider()
-const configuredModel = settingsManager.getDefaultModel()
-const allModels = modelRegistry.getAll()
-const availableModels = modelRegistry.getAvailable()
-const configuredExists = configuredProvider && configuredModel &&
-  allModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
-const configuredAvailable = configuredProvider && configuredModel &&
-  availableModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
-
-if (!configuredModel || !configuredExists) {
-  // Model not configured at all, or removed from registry — pick a fallback.
-  // Only fires when the model is genuinely unknown (not just temporarily unavailable).
-  const piDefault = getPiDefaultModelAndProvider()
-  const preferred =
-    (piDefault
-      ? availableModels.find((m) => m.provider === piDefault.provider && m.id === piDefault.model)
-      : undefined) ||
-    availableModels.find((m) => m.provider === 'openai' && m.id === 'gpt-5.4') ||
-    availableModels.find((m) => m.provider === 'openai') ||
-    availableModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-opus-4-6') ||
-    availableModels.find((m) => m.provider === 'anthropic' && m.id.includes('opus')) ||
-    availableModels.find((m) => m.provider === 'anthropic') ||
-    availableModels[0]
-  if (preferred) {
-    settingsManager.setDefaultModelAndProvider(preferred.provider, preferred.id)
-  }
-}
-
-if (settingsManager.getDefaultThinkingLevel() !== 'off' && !configuredExists) {
-  settingsManager.setDefaultThinkingLevel('off')
-}
-
 // GSD always uses quiet startup — the gsd extension renders its own branded header
 if (!settingsManager.getQuietStartup()) {
   settingsManager.setQuietStartup(true)
@@ -476,6 +459,11 @@ if (isPrintMode) {
     resourceLoader,
   })
   markStartup('createAgentSession')
+
+  // Validate configured model AFTER extensions have registered their models (#2626).
+  // Before this, extension-provided models (e.g. claude-code/*) were not yet in the
+  // registry, causing the user's valid choice to be silently overwritten.
+  validateConfiguredModel(modelRegistry, settingsManager)
 
   if (extensionsResult.errors.length > 0) {
     for (const err of extensionsResult.errors) {
@@ -566,6 +554,20 @@ if (!cliFlags.worktree && !isPrintMode) {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-redirect: `gsd auto` with piped stdout → headless mode (#2732)
+// When stdout is not a TTY (e.g. `gsd auto | cat`, `gsd auto > file`),
+// the TUI cannot render and the process hangs. Redirect to headless mode
+// which handles non-interactive output gracefully.
+// ---------------------------------------------------------------------------
+if (cliFlags.messages[0] === 'auto' && !process.stdout.isTTY) {
+  await ensureRtkBootstrap()
+  const { runHeadless, parseHeadlessArgs } = await import('./headless.js')
+  process.stderr.write('[gsd] stdout is not a terminal — running auto-mode in headless mode.\n')
+  await runHeadless(parseHeadlessArgs(['node', 'gsd', 'headless', ...cliFlags.messages.slice(1)]))
+  process.exit(0)
+}
+
+// ---------------------------------------------------------------------------
 // Interactive mode — normal TTY session
 // ---------------------------------------------------------------------------
 
@@ -610,6 +612,11 @@ const { session, extensionsResult } = await createAgentSession({
   resourceLoader,
 })
 markStartup('createAgentSession')
+
+// Validate configured model AFTER extensions have registered their models (#2626).
+// Before this, extension-provided models (e.g. claude-code/*) were not yet in the
+// registry, causing the user's valid choice to be silently overwritten.
+validateConfiguredModel(modelRegistry, settingsManager)
 
 if (extensionsResult.errors.length > 0) {
   for (const err of extensionsResult.errors) {
@@ -662,14 +669,21 @@ if (enabledModelPatterns && enabledModelPatterns.length > 0) {
   }
 }
 
-if (!process.stdin.isTTY) {
-  process.stderr.write('[gsd] Error: Interactive mode requires a terminal (TTY).\n')
+if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  const missing = !process.stdin.isTTY && !process.stdout.isTTY
+    ? 'stdin and stdout are'
+    : !process.stdin.isTTY
+      ? 'stdin is'
+      : 'stdout is'
+  process.stderr.write(`[gsd] Error: Interactive mode requires a terminal (TTY) but ${missing} not a TTY.\n`)
   process.stderr.write('[gsd] Non-interactive alternatives:\n')
+  process.stderr.write('[gsd]   gsd auto                       Auto-mode (pipeable, no TUI)\n')
   process.stderr.write('[gsd]   gsd --print "your message"     Single-shot prompt\n')
   process.stderr.write('[gsd]   gsd --web [path]               Browser-only web mode\n')
   process.stderr.write('[gsd]   gsd --mode rpc                 JSON-RPC over stdin/stdout\n')
   process.stderr.write('[gsd]   gsd --mode mcp                 MCP server over stdin/stdout\n')
   process.stderr.write('[gsd]   gsd --mode text "message"      Text output mode\n')
+  process.stderr.write('[gsd]   gsd headless                   Auto-mode without TUI\n')
   process.exit(1)
 }
 
@@ -688,4 +702,3 @@ const interactiveMode = new InteractiveMode(session)
 markStartup('InteractiveMode')
 printStartupTimings()
 await interactiveMode.run()
-

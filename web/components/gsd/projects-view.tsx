@@ -65,6 +65,7 @@ interface ProjectDetectionSignals {
   hasCargo?: boolean
   hasGoMod?: boolean
   hasPyproject?: boolean
+  isMonorepo?: boolean
 }
 
 interface ProjectProgressInfo {
@@ -121,6 +122,7 @@ const KIND_STYLE: Record<ProjectDetectionKind, { label: string; color: string; b
 
 function techStack(signals: ProjectDetectionSignals): string[] {
   const tags: string[] = []
+  if (signals.isMonorepo) tags.push("Monorepo")
   if (signals.hasGitRepo) tags.push("Git")
   if (signals.hasPackageJson) tags.push("Node.js")
   if (signals.hasCargo) tags.push("Rust")
@@ -369,7 +371,6 @@ export function ProjectsPanel({
     // loading toast managed by WorkspaceChrome
     onOpenChange(false)
     manager.switchProject(project.path)
-    window.dispatchEvent(new CustomEvent("gsd:navigate-view", { detail: { view: "dashboard" } }))
   }
 
   // Sort: active-gsd first, then by name

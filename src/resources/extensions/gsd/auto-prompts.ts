@@ -87,6 +87,11 @@ function buildSourceFilePaths(
     paths.push(`- **Decisions**: \`${relGsdRootFile("DECISIONS")}\``);
   }
 
+  const queuePath = resolveGsdRootFile(base, "QUEUE");
+  if (existsSync(queuePath)) {
+    paths.push(`- **Queue**: \`${relGsdRootFile("QUEUE")}\``);
+  }
+
   const contextPath = resolveMilestoneFile(base, mid, "CONTEXT");
   if (contextPath) {
     paths.push(`- **Milestone Context**: \`${relMilestoneFile(base, mid, "CONTEXT")}\``);
@@ -915,6 +920,16 @@ export async function buildPlanMilestonePrompt(mid: string, midTitle: string, ba
     const decisionsInline = await inlineDecisionsFromDb(base, mid, undefined, inlineLevel);
     if (decisionsInline) inlined.push(decisionsInline);
   }
+  const queuePath = resolveGsdRootFile(base, "QUEUE");
+  if (existsSync(queuePath)) {
+    const queueInline = await inlineFileSmart(
+      queuePath,
+      relGsdRootFile("QUEUE"),
+      "Project Queue",
+      `${mid} ${midTitle}`,
+    );
+    inlined.push(queueInline);
+  }
   const knowledgeInlinePM = await inlineGsdRootFile(base, "knowledge.md", "Project Knowledge");
   if (knowledgeInlinePM) inlined.push(knowledgeInlinePM);
   inlined.push(inlineTemplate("roadmap", "Roadmap"));
@@ -1553,7 +1568,7 @@ export async function buildRunUatPrompt(
 
   const inlinedContext = capPreamble(`## Inlined Context (preloaded — do not re-read these files)\n\n${inlined.join("\n\n---\n\n")}`);
 
-  const uatResultPath = join(base, relSliceFile(base, mid, sliceId, "UAT"));
+  const uatResultPath = join(base, relSliceFile(base, mid, sliceId, "ASSESSMENT"));
   const uatType = getUatType(uatContent);
 
   return loadPrompt("run-uat", {

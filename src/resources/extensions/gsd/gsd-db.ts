@@ -6,7 +6,7 @@
 // Schema is initialized on first open with WAL mode for file-backed DBs.
 
 import { createRequire } from "node:module";
-import { existsSync, copyFileSync, mkdirSync } from "node:fs";
+import { existsSync, copyFileSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Decision, Requirement, GateRow, GateId, GateScope, GateStatus, GateVerdict } from "./types.js";
 import { GSDError, GSD_STALE_STATE } from "./errors.js";
@@ -778,8 +778,21 @@ export function openDatabase(path: string): boolean {
   try {
     initSchema(adapter, fileBacked);
   } catch (err) {
-    try { adapter.close(); } catch { /* swallow */ }
-    throw err;
+    // Corrupt freelist: DDL fails with "malformed" but VACUUM can rebuild.
+    // Attempt VACUUM recovery before giving up (see #2519).
+    if (fileBacked && err instanceof Error && err.message?.includes("malformed")) {
+      try {
+        adapter.exec("VACUUM");
+        initSchema(adapter, fileBacked);
+        process.stderr.write("gsd-db: recovered corrupt database via VACUUM\n");
+      } catch (retryErr) {
+        try { adapter.close(); } catch { /* swallow */ }
+        throw retryErr;
+      }
+    } else {
+      try { adapter.close(); } catch { /* swallow */ }
+      throw err;
+    }
   }
 
   currentDb = adapter;
@@ -1124,10 +1137,11 @@ export function insertMilestone(m: {
   });
 }
 
-export function upsertMilestonePlanning(milestoneId: string, planning: Partial<MilestonePlanningRecord>): void {
+export function upsertMilestonePlanning(milestoneId: string, planning: Partial<MilestonePlanningRecord>, title?: string): void {
   if (!currentDb) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   currentDb.prepare(
     `UPDATE milestones SET
+      title = COALESCE(:title, title),
       vision = COALESCE(:vision, vision),
       success_criteria = COALESCE(:success_criteria, success_criteria),
       key_risks = COALESCE(:key_risks, key_risks),
@@ -1142,6 +1156,7 @@ export function upsertMilestonePlanning(milestoneId: string, planning: Partial<M
      WHERE id = :id`,
   ).run({
     ":id": milestoneId,
+    ":title": title ?? null,
     ":vision": planning.vision ?? null,
     ":success_criteria": planning.successCriteria ? JSON.stringify(planning.successCriteria) : null,
     ":key_risks": planning.keyRisks ? JSON.stringify(planning.keyRisks) : null,
@@ -1519,6 +1534,26 @@ export function insertVerificationEvidence(e: {
   });
 }
 
+export interface VerificationEvidenceRow {
+  id: number;
+  task_id: string;
+  slice_id: string;
+  milestone_id: string;
+  command: string;
+  exit_code: number;
+  verdict: string;
+  duration_ms: number;
+  created_at: string;
+}
+
+export function getVerificationEvidence(milestoneId: string, sliceId: string, taskId: string): VerificationEvidenceRow[] {
+  if (!currentDb) return [];
+  const rows = currentDb.prepare(
+    "SELECT * FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid ORDER BY id",
+  ).all({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId });
+  return rows as unknown as VerificationEvidenceRow[];
+}
+
 export interface MilestoneRow {
   id: string;
   title: string;
@@ -1761,6 +1796,11 @@ export function reconcileWorktreeDb(
 ): ReconcileResult {
   const zero: ReconcileResult = { decisions: 0, requirements: 0, artifacts: 0, milestones: 0, slices: 0, tasks: 0, memories: 0, verification_evidence: 0, conflicts: [] };
   if (!existsSync(worktreeDbPath)) return zero;
+  // Guard: bail when both paths resolve to the same physical file.
+  // ATTACHing a WAL-mode DB to itself corrupts the WAL (#2823).
+  try {
+    if (realpathSync(mainDbPath) === realpathSync(worktreeDbPath)) return zero;
+  } catch { /* path resolution failed — fall through to existing checks */ }
   // Sanitize path: reject any characters that could break ATTACH syntax.
   // ATTACH DATABASE doesn't support parameterized paths in all providers,
   // so we use strict allowlist validation instead.

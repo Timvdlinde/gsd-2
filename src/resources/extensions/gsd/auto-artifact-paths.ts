@@ -30,6 +30,10 @@ export function resolveExpectedArtifactPath(
       const dir = resolveMilestonePath(base, mid);
       return dir ? join(dir, buildMilestoneFileName(mid, "CONTEXT")) : null;
     }
+    case "discuss-slice": {
+      const dir = resolveSlicePath(base, mid, sid!);
+      return dir ? join(dir, buildSliceFileName(sid!, "CONTEXT")) : null;
+    }
     case "research-milestone": {
       const dir = resolveMilestonePath(base, mid);
       return dir ? join(dir, buildMilestoneFileName(mid, "RESEARCH")) : null;
@@ -52,7 +56,7 @@ export function resolveExpectedArtifactPath(
     }
     case "run-uat": {
       const dir = resolveSlicePath(base, mid, sid!);
-      return dir ? join(dir, buildSliceFileName(sid!, "UAT")) : null;
+      return dir ? join(dir, buildSliceFileName(sid!, "ASSESSMENT")) : null;
     }
     case "execute-task": {
       const dir = resolveSlicePath(base, mid, sid!);
@@ -98,6 +102,8 @@ export function diagnoseExpectedArtifact(
   switch (unitType) {
     case "discuss-milestone":
       return `${relMilestoneFile(base, mid, "CONTEXT")} (milestone context from discussion)`;
+    case "discuss-slice":
+      return `${relSliceFile(base, mid, sid!, "CONTEXT")} (slice context from discussion)`;
     case "research-milestone":
       return `${relMilestoneFile(base, mid, "RESEARCH")} (milestone research)`;
     case "plan-milestone":
@@ -118,7 +124,7 @@ export function diagnoseExpectedArtifact(
     case "reassess-roadmap":
       return `${relSliceFile(base, mid, sid!, "ASSESSMENT")} (roadmap reassessment)`;
     case "run-uat":
-      return `${relSliceFile(base, mid, sid!, "UAT")} (UAT result)`;
+      return `${relSliceFile(base, mid, sid!, "ASSESSMENT")} (UAT assessment result)`;
     case "validate-milestone":
       return `${relMilestoneFile(base, mid, "VALIDATION")} (milestone validation report)`;
     case "complete-milestone":

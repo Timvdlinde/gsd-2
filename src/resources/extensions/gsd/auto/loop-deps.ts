@@ -93,6 +93,7 @@ export interface LoopDeps {
     body: string,
     kind: string,
     category: string,
+    projectName?: string,
   ) => void;
   setActiveMilestoneId: (basePath: string, mid: string) => void;
   pruneQueueOrder: (basePath: string, pendingIds: string[]) => void;
@@ -209,7 +210,10 @@ export interface LoopDeps {
     verbose: boolean,
     startModel: { provider: string; id: string } | null,
     retryContext?: { isRetry: boolean; previousTier?: string },
-  ) => Promise<{ routing: { tier: string; modelDowngraded: boolean } | null }>;
+  ) => Promise<{
+    routing: { tier: string; modelDowngraded: boolean } | null;
+    appliedModel: { provider: string; id: string } | null;
+  }>;
   resolveModelId: <T extends { id: string; provider: string }>(
     modelId: string,
     availableModels: T[],

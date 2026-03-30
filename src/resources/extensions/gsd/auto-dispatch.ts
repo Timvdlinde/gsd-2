@@ -129,6 +129,21 @@ export function setRewriteCount(basePath: string, count: number): void {
   writeFileSync(filePath, JSON.stringify({ count, updatedAt: new Date().toISOString() }) + "\n");
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Returns true when the verification_operational value indicates that no
+ * operational verification is needed.  Covers common phrasings the planning
+ * agent may use: "None", "None required", "N/A", "Not applicable", etc.
+ *
+ * @see https://github.com/gsd-build/gsd-2/issues/2931
+ */
+export function isVerificationNotApplicable(value: string): boolean {
+  const v = (value ?? "").toLowerCase().trim();
+  if (!v || v === "none") return true;
+  return /^(?:none[\s._-]*(?:required|needed|planned)?|n\/?a|not[\s._-]+(?:applicable|required|needed)|no[\s._-]+operational[\s\S]*)$/i.test(v);
+}
+
 // ─── Rules ────────────────────────────────────────────────────────────────
 
 export const DISPATCH_RULES: DispatchRule[] = [
@@ -200,7 +215,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           uatContent ?? "",
           basePath,
         ),
-        pauseAfterDispatch: uatType !== "artifact-driven" && uatType !== "browser-executable" && uatType !== "runtime-executable",
+        pauseAfterDispatch: !process.env.GSD_HEADLESS && uatType !== "artifact-driven" && uatType !== "browser-executable" && uatType !== "runtime-executable",
       };
     },
   },
@@ -672,18 +687,18 @@ export const DISPATCH_RULES: DispatchRule[] = [
         if (isDbAvailable()) {
           const milestone = getMilestone(mid);
           if (milestone?.verification_operational &&
-              milestone.verification_operational.toLowerCase() !== "none") {
+              !isVerificationNotApplicable(milestone.verification_operational)) {
             const validationPath = resolveMilestoneFile(basePath, mid, "VALIDATION");
             if (validationPath) {
               const validationContent = await loadFile(validationPath);
               if (validationContent) {
-                // Accept either the structured template format (table with MET/N/A)
+                // Accept either the structured template format (table with MET/N/A/SATISFIED)
                 // or prose evidence patterns the validation agent may emit.
                 const structuredMatch =
                   validationContent.includes("Operational") &&
-                  (validationContent.includes("MET") || validationContent.includes("N/A"));
+                  (validationContent.includes("MET") || validationContent.includes("N/A") || validationContent.includes("SATISFIED"));
                 const proseMatch =
-                  /[Oo]perational[\s:][^\n]*(?:pass|verified|confirmed|met|complete|true|yes|addressed|covered|n\/a|not\s+applicable)/i.test(validationContent);
+                  /[Oo]perational[\s\S]{0,500}?(?:✅|pass|verified|confirmed|met|complete|true|yes|addressed|covered|satisfied|partially|n\/a|not[\s-]+applicable)/i.test(validationContent);
                 const hasOperationalCheck = structuredMatch || proseMatch;
                 if (!hasOperationalCheck) {
                   return {

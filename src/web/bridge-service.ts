@@ -526,12 +526,54 @@ export interface ProjectDetectionSignals {
   hasCargo?: boolean;
   hasGoMod?: boolean;
   hasPyproject?: boolean;
+  /** True when the directory looks like a monorepo root (workspaces, lerna, pnpm-workspace, etc.) */
+  isMonorepo?: boolean;
   fileCount: number;
 }
 
 export interface ProjectDetection {
   kind: ProjectDetectionKind;
   signals: ProjectDetectionSignals;
+}
+
+/**
+ * Detect whether a directory looks like a monorepo root.
+ *
+ * Checks for common monorepo indicators:
+ * - `pnpm-workspace.yaml` (pnpm workspaces)
+ * - `lerna.json` (Lerna)
+ * - `package.json` with a `workspaces` field (npm/yarn workspaces)
+ * - `rush.json` (Rush)
+ * - `nx.json` (Nx)
+ * - `turbo.json` (Turborepo)
+ *
+ * This is intentionally cheap — file existence checks only, with a single
+ * JSON parse for `package.json` workspaces (which we're already reading
+ * in many code paths). No deep directory scanning.
+ */
+export function detectMonorepo(dirPath: string, checkExists?: (path: string) => boolean): boolean {
+  const exists = checkExists ?? (getBridgeDeps().existsSync ?? existsSync);
+
+  // Fast checks — file existence only
+  if (exists(join(dirPath, "pnpm-workspace.yaml"))) return true;
+  if (exists(join(dirPath, "lerna.json"))) return true;
+  if (exists(join(dirPath, "rush.json"))) return true;
+  if (exists(join(dirPath, "nx.json"))) return true;
+  if (exists(join(dirPath, "turbo.json"))) return true;
+
+  // Check package.json for workspaces field (npm/yarn workspaces)
+  const packageJsonPath = join(dirPath, "package.json");
+  if (exists(packageJsonPath)) {
+    try {
+      const raw = readFileSync(packageJsonPath, "utf-8");
+      const pkg = JSON.parse(raw) as Record<string, unknown>;
+      if (pkg.workspaces != null) return true;
+    } catch {
+      // Malformed JSON or unreadable — not a monorepo indicator
+    }
+  }
+
+  return false;
 }
 
 export function detectProjectKind(projectCwd: string): ProjectDetection {
@@ -544,6 +586,7 @@ export function detectProjectKind(projectCwd: string): ProjectDetection {
   const hasCargo = checkExists(join(projectCwd, "Cargo.toml"));
   const hasGoMod = checkExists(join(projectCwd, "go.mod"));
   const hasPyproject = checkExists(join(projectCwd, "pyproject.toml"));
+  const isMonorepo = detectMonorepo(projectCwd, checkExists);
 
   // Count top-level non-dot entries (cheap heuristic for "has code")
   let fileCount = 0;
@@ -562,6 +605,7 @@ export function detectProjectKind(projectCwd: string): ProjectDetection {
     hasCargo,
     hasGoMod,
     hasPyproject,
+    isMonorepo,
     fileCount,
   };
 
@@ -615,6 +659,7 @@ export type BridgeLiveStateDomain = "auto" | "workspace" | "recovery" | "resumab
 export type BridgeLiveStateInvalidationSource = "bridge_event" | "rpc_command" | "session_manage";
 export type BridgeLiveStateInvalidationReason =
   | "agent_end"
+  | "turn_end"
   | "auto_retry_start"
   | "auto_retry_end"
   | "auto_compaction_start"
@@ -727,6 +772,7 @@ async function loadSessionBrowserSessionsViaChildProcess(config: BridgeRuntimeCo
           GSD_SESSION_BROWSER_DIR: config.projectSessionsDir,
         },
         maxBuffer: 1024 * 1024,
+        windowsHide: true,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -788,6 +834,7 @@ async function appendSessionInfoViaChildProcess(
           GSD_TARGET_SESSION_NAME: name,
         },
         maxBuffer: 1024 * 1024,
+        windowsHide: true,
       },
       (error, _stdout, stderr) => {
         if (error) {
@@ -986,6 +1033,7 @@ async function loadWorkspaceIndexViaChildProcess(basePath: string, packageRoot: 
           GSD_WORKSPACE_BASE: basePath,
         },
         maxBuffer: 1024 * 1024,
+        windowsHide: true,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -1205,6 +1253,13 @@ function createLiveStateInvalidationFromBridgeEvent(
         reason: "agent_end",
         source: "bridge_event",
         domains: ["auto", "workspace", "recovery"],
+        workspaceIndexCacheInvalidated: true,
+      };
+    case "turn_end":
+      return {
+        reason: "turn_end",
+        source: "bridge_event",
+        domains: ["workspace"],
         workspaceIndexCacheInvalidated: true,
       };
     case "auto_retry_start":
@@ -1572,6 +1627,7 @@ export class BridgeService {
       cwd: cliEntry.cwd,
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     }) as SpawnedRpcChild;
 
     this.process = child;
@@ -1727,6 +1783,7 @@ export class BridgeService {
       const eventType = (event as { type?: string }).type;
       if (
         eventType === "agent_end" ||
+        eventType === "turn_end" ||
         eventType === "auto_retry_start" ||
         eventType === "auto_retry_end" ||
         eventType === "auto_compaction_start" ||

@@ -9,7 +9,7 @@
  */
 
 import { execFileSync, execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gsdRoot } from "./paths.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
@@ -50,9 +50,9 @@ export interface GitPreferences {
   main_branch?: string;
   merge_strategy?: "squash" | "merge";
   /** Controls auto-mode git isolation strategy.
-   *  - "worktree": (default) creates a milestone worktree for isolated work
+   *  - "worktree": creates a milestone worktree for isolated work
    *  - "branch": works directly in the project root (for submodule-heavy repos)
-   *  - "none": no git isolation — commits land on the user's current branch directly
+   *  - "none": (default) no git isolation — commits land on the user's current branch directly
    */
   isolation?: "worktree" | "branch" | "none";
   /** When false, GSD will not modify .gitignore at all — no baseline patterns
@@ -488,6 +488,29 @@ export class GitServiceImpl {
     // If .gsd/ IS in .gitignore (the default for external state projects),
     // git add -A already skips it and the exclusions are harmless no-ops.
     const allExclusions = [...RUNTIME_EXCLUSION_PATHS, ...extraExclusions];
+
+    // ── Parallel worker milestone scope (#1991) ──
+    // When GSD_MILESTONE_LOCK is set, this process is a parallel worker that
+    // must only commit files belonging to its own milestone. Exclude all other
+    // milestone directories from staging to prevent cross-milestone pollution
+    // (e.g., an M033 worker fabricating M032 artifacts in the same commit).
+    const milestoneLock = process.env.GSD_MILESTONE_LOCK;
+    if (milestoneLock) {
+      const msDir = join(gsdRoot(this.basePath), "milestones");
+      if (existsSync(msDir)) {
+        try {
+          const entries = readdirSync(msDir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isDirectory() && entry.name !== milestoneLock) {
+              allExclusions.push(`.gsd/milestones/${entry.name}/`);
+            }
+          }
+        } catch {
+          // Best-effort — if we can't read the milestones dir, proceed without scoping
+        }
+      }
+    }
+
     nativeAddAllWithExclusions(this.basePath, allExclusions);
   }
 

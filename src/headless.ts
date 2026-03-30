@@ -43,9 +43,14 @@ import { VALID_OUTPUT_FORMATS } from './headless-types.js'
 import {
   handleExtensionUIRequest,
   formatProgress,
+  formatThinkingLine,
+  formatTextStart,
+  formatTextEnd,
+  formatThinkingStart,
+  formatThinkingEnd,
   startSupervisedStdinReader,
 } from './headless-ui.js'
-import type { ExtensionUIRequest } from './headless-ui.js'
+import type { ExtensionUIRequest, ProgressContext } from './headless-ui.js'
 
 import {
   loadContext,
@@ -129,13 +134,12 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
   }
 
   const args = argv.slice(2)
-  let positionalStarted = false
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (arg === 'headless') continue
 
-    if (!positionalStarted && arg.startsWith('--')) {
+    if (arg.startsWith('--')) {
       if (arg === '--timeout' && i + 1 < args.length) {
         options.timeout = parseInt(args[++i], 10)
         if (Number.isNaN(options.timeout) || options.timeout < 0) {
@@ -197,8 +201,7 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
       } else if (arg === '--bare') {
         options.bare = true
       }
-    } else if (!positionalStarted) {
-      positionalStarted = true
+    } else if (options.command === 'auto') {
       options.command = arg
     } else {
       options.commandArgs.push(arg)
@@ -256,6 +259,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   // per-unit timeout via auto-supervisor. Disable the overall timeout unless the
   // user explicitly set --timeout.
   const isAutoMode = options.command === 'auto'
+  const isMultiTurnCommand = options.command === 'auto' || options.command === 'next'
   if (isAutoMode && options.timeout === 300_000) {
     options.timeout = 0
   }
@@ -344,6 +348,8 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   if (injector) {
     clientOptions.env = injector.getSecretEnvVars()
   }
+  // Signal headless mode to the GSD extension (skips UAT human pause, etc.)
+  clientOptions.env = { ...(clientOptions.env as Record<string, string> || {}), GSD_HEADLESS: '1' }
   // Propagate --bare to the child process
   if (options.bare) {
     clientOptions.args = [...((clientOptions.args as string[]) || []), '--bare']
@@ -367,6 +373,14 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   let cumulativeCacheReadTokens = 0
   let cumulativeCacheWriteTokens = 0
   let lastSessionId: string | undefined
+
+  // Verbose text-mode state
+  const toolStartTimes = new Map<string, number>()
+  let lastCostData: { costUsd: number; inputTokens: number; outputTokens: number } | undefined
+  let thinkingBuffer = ''
+  // Streaming state: tracks whether we're inside a text or thinking block
+  let inTextBlock = false
+  let inThinkingBlock = false
 
   // Emit HeadlessJsonResult to stdout for --output-format json batch mode
   function emitBatchJsonResult(): void {
@@ -502,13 +516,128 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
         lastSessionId = String((eventObj as Record<string, unknown>).sessionId ?? '')
       }
     } else if (!options.json) {
-      // Progress output to stderr
-      const line = formatProgress(eventObj, !!options.verbose)
+      // Progress output to stderr with verbose state tracking
+      const eventType = String(eventObj.type ?? '')
+
+      // Track cost_update events for agent_end summary
+      if (eventType === 'cost_update') {
+        const data = eventObj as Record<string, unknown>
+        const cumCost = data.cumulativeCost as Record<string, unknown> | undefined
+        if (cumCost) {
+          const tokens = data.tokens as Record<string, number> | undefined
+          lastCostData = {
+            costUsd: Number(cumCost.costUsd ?? 0),
+            inputTokens: tokens?.input ?? 0,
+            outputTokens: tokens?.output ?? 0,
+          }
+        }
+      }
+
+      // Stream assistant text and thinking deltas in verbose mode
+      if (eventType === 'message_update') {
+        const ame = eventObj.assistantMessageEvent as Record<string, unknown> | undefined
+        if (ame && options.verbose) {
+          const ameType = String(ame.type ?? '')
+
+          // --- Text streaming ---
+          if (ameType === 'text_start') {
+            inTextBlock = true
+            process.stderr.write(formatTextStart())
+          } else if (ameType === 'text_delta') {
+            const delta = String(ame.delta ?? ame.text ?? '')
+            if (delta) {
+              if (!inTextBlock) {
+                // Edge case: delta without start
+                inTextBlock = true
+                process.stderr.write(formatTextStart())
+              }
+              process.stderr.write(delta)
+            }
+          } else if (ameType === 'text_end') {
+            if (inTextBlock) {
+              process.stderr.write(formatTextEnd() + '\n')
+              inTextBlock = false
+            }
+          }
+
+          // --- Thinking streaming ---
+          else if (ameType === 'thinking_start') {
+            inThinkingBlock = true
+            process.stderr.write(formatThinkingStart())
+          } else if (ameType === 'thinking_delta') {
+            const delta = String(ame.delta ?? ame.text ?? '')
+            if (delta) {
+              if (!inThinkingBlock) {
+                inThinkingBlock = true
+                process.stderr.write(formatThinkingStart())
+              }
+              process.stderr.write(delta)
+            }
+          } else if (ameType === 'thinking_end') {
+            if (inThinkingBlock) {
+              process.stderr.write(formatThinkingEnd() + '\n')
+              inThinkingBlock = false
+            }
+          }
+        }
+        // Non-verbose: accumulate text_delta for truncated one-liner
+        else if (ame?.type === 'text_delta') {
+          thinkingBuffer += String(ame.delta ?? ame.text ?? '')
+        }
+      }
+
+      // Track tool execution start timestamps
+      if (eventType === 'tool_execution_start') {
+        const toolCallId = String(eventObj.toolCallId ?? eventObj.id ?? '')
+        if (toolCallId) toolStartTimes.set(toolCallId, Date.now())
+      }
+
+      // Close any open streaming blocks before tool calls or message end
+      if (options.verbose && (eventType === 'tool_execution_start' || eventType === 'message_end')) {
+        if (inTextBlock) {
+          process.stderr.write('\n')
+          inTextBlock = false
+        }
+        if (inThinkingBlock) {
+          process.stderr.write('\n')
+          inThinkingBlock = false
+        }
+      }
+      // Non-verbose: flush accumulated buffer as truncated one-liner
+      else if (!options.verbose && thinkingBuffer.trim() &&
+          (eventType === 'tool_execution_start' || eventType === 'message_end')) {
+        process.stderr.write(formatThinkingLine(thinkingBuffer) + '\n')
+        thinkingBuffer = ''
+      }
+
+      // Compute tool duration for tool_execution_end
+      let toolDuration: number | undefined
+      let isToolError = false
+      if (eventType === 'tool_execution_end') {
+        const toolCallId = String(eventObj.toolCallId ?? eventObj.id ?? '')
+        const startTime = toolStartTimes.get(toolCallId)
+        if (startTime) {
+          toolDuration = Date.now() - startTime
+          toolStartTimes.delete(toolCallId)
+        }
+        isToolError = eventObj.isError === true || eventObj.error != null
+      }
+
+      const ctx: ProgressContext = {
+        verbose: !!options.verbose,
+        toolDuration,
+        isError: isToolError,
+        lastCost: eventType === 'agent_end' ? lastCostData : undefined,
+      }
+
+      const line = formatProgress(eventObj, ctx)
       if (line) process.stderr.write(line + '\n')
     }
 
     // Handle execution_complete (v2 structured completion)
-    if (eventObj.type === 'execution_complete' && !completed) {
+    // Skip for multi-turn commands (auto, next) — their completion is detected via
+    // isTerminalNotification("Auto-mode stopped..."/"Step-mode stopped..."), not per-turn events
+    if (eventObj.type === 'execution_complete' && !completed && !isMultiTurnCommand) {
       completed = true
       const status = String(eventObj.status ?? 'success')
       exitCode = mapStatusToExitCode(status)

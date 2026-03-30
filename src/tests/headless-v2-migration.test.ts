@@ -132,6 +132,7 @@ interface EventHandlerState {
   blocked: boolean
   exitCode: number
   v2Enabled: boolean
+  isMultiTurnCommand?: boolean
 }
 
 function handleEvent(
@@ -140,7 +141,9 @@ function handleEvent(
   client: MockRpcClient,
 ): void {
   // execution_complete (v2 structured completion)
-  if (eventObj.type === 'execution_complete' && !state.completed) {
+  // Skip for multi-turn commands (auto, next) — their completion is detected via
+  // isTerminalNotification, not per-turn events
+  if (eventObj.type === 'execution_complete' && !state.completed && !state.isMultiTurnCommand) {
     state.completed = true
     const status = String(eventObj.status ?? 'success')
     state.exitCode = mapStatusToExitCode(status)
@@ -459,4 +462,73 @@ test('injector adapter handles multi-select values', () => {
   assert.equal(client.sendUICalls.length, 1)
   assert.equal(client.sendUICalls[0].id, 'inj3')
   assert.deepEqual(client.sendUICalls[0].response.values, ['a', 'b'])
+})
+
+// ─── multi-turn command (auto/next) skips execution_complete ───────────────
+
+test('execution_complete is ignored for multi-turn commands (auto)', () => {
+  const client = new MockRpcClient()
+  const state: EventHandlerState = { completed: false, blocked: false, exitCode: -1, v2Enabled: true, isMultiTurnCommand: true }
+
+  handleEvent({ type: 'execution_complete', status: 'success' }, state, client)
+
+  assert.equal(state.completed, false, 'should not mark completed for auto/next commands')
+  assert.equal(state.exitCode, -1, 'exit code should remain unchanged')
+})
+
+test('execution_complete is ignored for multi-turn commands even with error status', () => {
+  const client = new MockRpcClient()
+  const state: EventHandlerState = { completed: false, blocked: false, exitCode: -1, v2Enabled: true, isMultiTurnCommand: true }
+
+  handleEvent({ type: 'execution_complete', status: 'error' }, state, client)
+
+  assert.equal(state.completed, false, 'should not mark completed for auto/next commands')
+  assert.equal(state.exitCode, -1, 'exit code should remain unchanged')
+})
+
+test('multi-turn commands still complete via terminal notification', () => {
+  const client = new MockRpcClient()
+  const state: EventHandlerState = { completed: false, blocked: false, exitCode: -1, v2Enabled: true, isMultiTurnCommand: true }
+
+  // First, execution_complete fires (should be ignored)
+  handleEvent({ type: 'execution_complete', status: 'success' }, state, client)
+  assert.equal(state.completed, false, 'execution_complete should be skipped')
+
+  // Then the real terminal notification fires
+  handleEvent(
+    { type: 'extension_ui_request', method: 'notify', id: 'n1', message: 'Auto-mode stopped — all slices complete' },
+    state,
+    client,
+  )
+  assert.equal(state.completed, true, 'terminal notification should trigger completion')
+  assert.equal(state.exitCode, EXIT_SUCCESS)
+})
+
+test('multi-turn commands detect blocked via terminal notification', () => {
+  const client = new MockRpcClient()
+  const state: EventHandlerState = { completed: false, blocked: false, exitCode: -1, v2Enabled: true, isMultiTurnCommand: true }
+
+  // execution_complete is ignored
+  handleEvent({ type: 'execution_complete', status: 'success' }, state, client)
+  assert.equal(state.completed, false)
+
+  // Blocked terminal notification
+  handleEvent(
+    { type: 'extension_ui_request', method: 'notify', id: 'n2', message: 'Auto-mode stopped (Blocked: plan rejected)' },
+    state,
+    client,
+  )
+  assert.equal(state.completed, true)
+  assert.equal(state.blocked, true)
+  assert.equal(state.exitCode, EXIT_BLOCKED)
+})
+
+test('non-multi-turn commands still complete on execution_complete', () => {
+  const client = new MockRpcClient()
+  const state: EventHandlerState = { completed: false, blocked: false, exitCode: -1, v2Enabled: true, isMultiTurnCommand: false }
+
+  handleEvent({ type: 'execution_complete', status: 'success' }, state, client)
+
+  assert.equal(state.completed, true, 'single-turn commands should complete on execution_complete')
+  assert.equal(state.exitCode, EXIT_SUCCESS)
 })
