@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import type { ExtensionContext } from "@gsd/pi-coding-agent";
 
+import { logWarning } from "../workflow-logger.js";
 import { debugTime } from "../debug-logger.js";
 import { loadPrompt } from "../prompt-loader.js";
 import { readForensicsMarker } from "../forensics.js";
@@ -83,8 +84,8 @@ export async function buildBeforeAgentStartResult(
         memoryBlock = `\n\n${formatted}`;
       }
     }
-  } catch {
-    // non-fatal
+  } catch (e) {
+    logWarning("bootstrap", `memory block fetch failed: ${(e as Error).message}`);
   }
 
   let newSkillsBlock = "";
@@ -92,6 +93,27 @@ export async function buildBeforeAgentStartResult(
     const newSkills = detectNewSkills();
     if (newSkills.length > 0) {
       newSkillsBlock = formatSkillsXml(newSkills);
+    }
+  }
+
+  let codebaseBlock = "";
+  const codebasePath = resolveGsdRootFile(process.cwd(), "CODEBASE");
+  if (existsSync(codebasePath)) {
+    try {
+      const rawContent = readFileSync(codebasePath, "utf-8").trim();
+      if (rawContent) {
+        // Cap injection size to ~2 000 tokens to avoid bloating every request.
+        // Full map is always available at .gsd/CODEBASE.md.
+        const MAX_CODEBASE_CHARS = 8_000;
+        const generatedMatch = rawContent.match(/Generated: (\S+)/);
+        const generatedAt = generatedMatch?.[1] ?? "unknown";
+        const content = rawContent.length > MAX_CODEBASE_CHARS
+          ? rawContent.slice(0, MAX_CODEBASE_CHARS) + "\n\n*(truncated — see .gsd/CODEBASE.md for full map)*"
+          : rawContent;
+        codebaseBlock = `\n\n[PROJECT CODEBASE — File structure and descriptions (generated ${generatedAt}, may be stale — run /gsd codebase update to refresh)]\n\n${content}`;
+      }
+    } catch (e) {
+      logWarning("bootstrap", `CODEBASE file read failed: ${(e as Error).message}`);
     }
   }
 
@@ -103,7 +125,7 @@ export async function buildBeforeAgentStartResult(
   const forensicsInjection = !injection ? buildForensicsContextInjection(process.cwd()) : null;
 
   const worktreeBlock = buildWorktreeContextBlock();
-  const fullSystem = `${event.systemPrompt}\n\n[SYSTEM CONTEXT — GSD]\n\n${systemContent}${preferenceBlock}${knowledgeBlock}${memoryBlock}${newSkillsBlock}${worktreeBlock}`;
+  const fullSystem = `${event.systemPrompt}\n\n[SYSTEM CONTEXT — GSD]\n\n${systemContent}${preferenceBlock}${knowledgeBlock}${codebaseBlock}${memoryBlock}${newSkillsBlock}${worktreeBlock}`;
 
   stopContextTimer({
     systemPromptSize: fullSystem.length,
@@ -137,8 +159,8 @@ export function loadKnowledgeBlock(gsdHomeDir: string, cwd: string): { block: st
         globalSizeKb = Buffer.byteLength(content, "utf-8") / 1024;
         globalKnowledge = content;
       }
-    } catch {
-      // skip
+    } catch (e) {
+      logWarning("bootstrap", `global knowledge file read failed: ${(e as Error).message}`);
     }
   }
 
@@ -149,8 +171,8 @@ export function loadKnowledgeBlock(gsdHomeDir: string, cwd: string): { block: st
     try {
       const content = readFileSync(knowledgePath, "utf-8").trim();
       if (content) projectKnowledge = content;
-    } catch {
-      // skip
+    } catch (e) {
+      logWarning("bootstrap", `project knowledge file read failed: ${(e as Error).message}`);
     }
   }
 
@@ -408,8 +430,8 @@ export function clearForensicsMarker(basePath: string): void {
   if (existsSync(markerPath)) {
     try {
       unlinkSync(markerPath);
-    } catch {
-      // non-fatal
+    } catch (e) {
+      logWarning("bootstrap", `unlinkSync forensics marker failed: ${(e as Error).message}`);
     }
   }
 }

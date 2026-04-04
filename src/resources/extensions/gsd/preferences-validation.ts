@@ -428,6 +428,10 @@ export function validatePreferences(preferences: GSDPreferences): {
         if (typeof dr.hooks === "boolean") validDr.hooks = dr.hooks;
         else errors.push("dynamic_routing.hooks must be a boolean");
       }
+      if (dr.capability_routing !== undefined) {
+        if (typeof dr.capability_routing === "boolean") validDr.capability_routing = dr.capability_routing;
+        else errors.push("dynamic_routing.capability_routing must be a boolean");
+      }
       if (dr.tier_models !== undefined) {
         if (typeof dr.tier_models === "object" && dr.tier_models !== null) {
           const tm = dr.tier_models as Record<string, unknown>;
@@ -449,6 +453,40 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
     } else {
       errors.push("dynamic_routing must be an object");
+    }
+  }
+
+  // ─── Context Management ──────────────────────────────────────────────
+  if (preferences.context_management !== undefined) {
+    if (typeof preferences.context_management === "object" && preferences.context_management !== null) {
+      const cm = preferences.context_management as unknown as Record<string, unknown>;
+      const validCm: Record<string, unknown> = {};
+
+      if (cm.observation_masking !== undefined) {
+        if (typeof cm.observation_masking === "boolean") validCm.observation_masking = cm.observation_masking;
+        else errors.push("context_management.observation_masking must be a boolean");
+      }
+      if (cm.observation_mask_turns !== undefined) {
+        const turns = cm.observation_mask_turns;
+        if (typeof turns === "number" && turns >= 1 && turns <= 50) validCm.observation_mask_turns = turns;
+        else errors.push("context_management.observation_mask_turns must be a number between 1 and 50");
+      }
+      if (cm.compaction_threshold_percent !== undefined) {
+        const pct = cm.compaction_threshold_percent;
+        if (typeof pct === "number" && pct >= 0.5 && pct <= 0.95) validCm.compaction_threshold_percent = pct;
+        else errors.push("context_management.compaction_threshold_percent must be a number between 0.5 and 0.95");
+      }
+      if (cm.tool_result_max_chars !== undefined) {
+        const chars = cm.tool_result_max_chars;
+        if (typeof chars === "number" && chars >= 200 && chars <= 10000) validCm.tool_result_max_chars = chars;
+        else errors.push("context_management.tool_result_max_chars must be a number between 200 and 10000");
+      }
+
+      if (Object.keys(validCm).length > 0) {
+        validated.context_management = validCm as any;
+      }
+    } else {
+      errors.push("context_management must be an object");
     }
   }
 
@@ -816,6 +854,51 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
     } else {
       errors.push("experimental must be an object");
+    }
+  }
+
+  // ─── Codebase Map ──────────────────────────────────────────────────
+  if (preferences.codebase !== undefined) {
+    if (typeof preferences.codebase === "object" && preferences.codebase !== null) {
+      const cb = preferences.codebase as Record<string, unknown>;
+      const validCb: import("./preferences-types.js").CodebaseMapPreferences = {};
+
+      if (cb.exclude_patterns !== undefined) {
+        if (Array.isArray(cb.exclude_patterns) && cb.exclude_patterns.every((p: unknown) => typeof p === "string")) {
+          validCb.exclude_patterns = cb.exclude_patterns as string[];
+        } else {
+          errors.push("codebase.exclude_patterns must be an array of strings");
+        }
+      }
+      if (cb.max_files !== undefined) {
+        const mf = typeof cb.max_files === "number" ? cb.max_files : Number(cb.max_files);
+        if (Number.isFinite(mf) && mf >= 1) {
+          validCb.max_files = Math.floor(mf);
+        } else {
+          errors.push("codebase.max_files must be a positive integer");
+        }
+      }
+      if (cb.collapse_threshold !== undefined) {
+        const ct = typeof cb.collapse_threshold === "number" ? cb.collapse_threshold : Number(cb.collapse_threshold);
+        if (Number.isFinite(ct) && ct >= 1) {
+          validCb.collapse_threshold = Math.floor(ct);
+        } else {
+          errors.push("codebase.collapse_threshold must be a positive integer");
+        }
+      }
+
+      const knownCbKeys = new Set(["exclude_patterns", "max_files", "collapse_threshold"]);
+      for (const key of Object.keys(cb)) {
+        if (!knownCbKeys.has(key)) {
+          warnings.push(`unknown codebase key "${key}" — ignored`);
+        }
+      }
+
+      if (Object.keys(validCb).length > 0) {
+        validated.codebase = validCb;
+      }
+    } else {
+      errors.push("codebase must be an object");
     }
   }
 

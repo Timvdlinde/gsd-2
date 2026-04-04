@@ -19,6 +19,7 @@ import { parse as parseYaml } from "yaml";
 import type { PostUnitHookConfig, PreDispatchHookConfig, TokenProfile } from "./types.js";
 import type { DynamicRoutingConfig } from "./model-router.js";
 import { normalizeStringArray } from "../shared/format-utils.js";
+import { logWarning } from "./workflow-logger.js";
 import { resolveProfileDefaults as _resolveProfileDefaults } from "./preferences-models.js";
 
 import {
@@ -48,6 +49,7 @@ export type {
   AutoSupervisorConfig,
   RemoteQuestionsConfig,
   CmuxPreferences,
+  CodebaseMapPreferences,
   GSDPreferences,
   LoadedGSDPreferences,
   SkillResolution,
@@ -237,7 +239,7 @@ function parseFrontmatterBlock(frontmatter: string): GSDPreferences {
     }
     return parsed as GSDPreferences;
   } catch (e) {
-    console.error("[parseFrontmatterBlock] YAML parse error:", e);
+    logWarning("guided", `YAML parse error in frontmatter block: ${(e as Error).message}`);
     return {} as GSDPreferences;
   }
 }
@@ -296,8 +298,8 @@ function parseHeadingListFormat(content: string): GSDPreferences {
       }
 
       typed[targetSection] = value;
-    } catch {
-      /* malformed section — skip */
+    } catch (e) {
+      logWarning("guided", `preferences section parse failed: ${(e as Error).message}`);
     }
   }
 
@@ -371,6 +373,17 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
     service_tier: override.service_tier ?? base.service_tier,
     forensics_dedup: override.forensics_dedup ?? base.forensics_dedup,
     show_token_cost: override.show_token_cost ?? base.show_token_cost,
+    codebase: (base.codebase || override.codebase)
+      ? {
+          ...(base.codebase ?? {}),
+          ...(override.codebase ?? {}),
+          // Merge exclude_patterns arrays rather than overriding
+          exclude_patterns: [
+            ...((base.codebase?.exclude_patterns) ?? []),
+            ...((override.codebase?.exclude_patterns) ?? []),
+          ].filter(Boolean),
+        }
+      : undefined,
   };
 }
 

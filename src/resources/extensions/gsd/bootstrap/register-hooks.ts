@@ -48,26 +48,20 @@ export function registerHooks(pi: ExtensionAPI): void {
           const { dirname } = await import("node:path");
           const { printWelcomeScreen } = await import(
             join(dirname(gsdBinPath), "welcome-screen.js")
-          ) as { printWelcomeScreen: (opts: { version: string; modelName?: string; provider?: string }) => void };
-          printWelcomeScreen({ version: process.env.GSD_VERSION || "0.0.0" });
+          ) as { printWelcomeScreen: (opts: { version: string; modelName?: string; provider?: string; remoteChannel?: string }) => void };
+
+          let remoteChannel: string | undefined;
+          try {
+            const { resolveRemoteConfig } = await import("../../remote-questions/config.js");
+            const rc = resolveRemoteConfig();
+            if (rc) remoteChannel = rc.channel;
+          } catch { /* non-fatal */ }
+
+          printWelcomeScreen({ version: process.env.GSD_VERSION || "0.0.0", remoteChannel });
         }
       } catch { /* non-fatal */ }
     }
     loadToolApiKeys();
-    try {
-      const [{ getRemoteConfigStatus }, { getLatestPromptSummary }] = await Promise.all([
-        import("../../remote-questions/config.js"),
-        import("../../remote-questions/status.js"),
-      ]);
-      const status = getRemoteConfigStatus();
-      const latest = getLatestPromptSummary();
-      if (!status.includes("not configured")) {
-        const suffix = latest ? `\nLast remote prompt: ${latest.id} (${latest.status})` : "";
-        ctx.ui.notify(`${status}${suffix}`, status.includes("disabled") ? "warning" : "info");
-      }
-    } catch {
-      // ignore
-    }
   });
 
   pi.on("session_switch", async (_event, ctx) => {
@@ -269,14 +263,71 @@ export function registerHooks(pi: ExtensionAPI): void {
   });
 
   pi.on("before_provider_request", async (event) => {
-    const modelId = event.model?.id;
-    if (!modelId) return;
-    const { getEffectiveServiceTier, supportsServiceTier } = await import("../service-tier.js");
-    const tier = getEffectiveServiceTier();
-    if (!tier || !supportsServiceTier(modelId)) return;
     const payload = event.payload as Record<string, unknown> | null;
     if (!payload || typeof payload !== "object") return;
+
+    // ── Observation Masking ─────────────────────────────────────────────
+    // Replace old tool results with placeholders to reduce context bloat.
+    // Only active during auto-mode when context_management.observation_masking is enabled.
+    if (isAutoActive()) {
+      try {
+        const { loadEffectiveGSDPreferences } = await import("../preferences.js");
+        const prefs = loadEffectiveGSDPreferences();
+        const cmConfig = prefs?.preferences.context_management;
+
+        // Observation masking: replace old tool results with placeholders
+        if (cmConfig?.observation_masking !== false) {
+          const keepTurns = cmConfig?.observation_mask_turns ?? 8;
+          const { createObservationMask } = await import("../context-masker.js");
+          const mask = createObservationMask(keepTurns);
+          const messages = payload.messages;
+          if (Array.isArray(messages)) {
+            payload.messages = mask(messages);
+          }
+        }
+
+        // Tool result truncation: cap individual tool result content length.
+        // In pi-ai format, toolResult messages have role: "toolResult" and content: TextContent[].
+        // Creates new objects to avoid mutating shared conversation state.
+        const maxChars = cmConfig?.tool_result_max_chars ?? 800;
+        const msgs = payload.messages;
+        if (Array.isArray(msgs)) {
+          payload.messages = msgs.map((msg: Record<string, unknown>) => {
+            // Match toolResult messages (role: "toolResult", content is array of content blocks)
+            if (msg?.role === "toolResult" && Array.isArray(msg.content)) {
+              const blocks = msg.content as Array<Record<string, unknown>>;
+              const totalLen = blocks.reduce((sum: number, b) => sum + (typeof b.text === "string" ? b.text.length : 0), 0);
+              if (totalLen > maxChars) {
+                const truncated = blocks.map(b => {
+                  if (typeof b.text === "string" && b.text.length > maxChars) {
+                    return { ...b, text: b.text.slice(0, maxChars) + "\n…[truncated]" };
+                  }
+                  return b;
+                });
+                return { ...msg, content: truncated };
+              }
+            }
+            return msg;
+          });
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    // ── Service Tier ────────────────────────────────────────────────────
+    const modelId = event.model?.id;
+    if (!modelId) return payload;
+    const { getEffectiveServiceTier, supportsServiceTier } = await import("../service-tier.js");
+    const tier = getEffectiveServiceTier();
+    if (!tier || !supportsServiceTier(modelId)) return payload;
     payload.service_tier = tier;
     return payload;
+  });
+
+  // Capability-aware model routing hook (ADR-004)
+  // Extensions can override model selection by returning { modelId: "..." }
+  // Return undefined to let the built-in capability scoring proceed.
+  pi.on("before_model_select", async (_event) => {
+    // Default: no override — let capability scoring handle selection
+    return undefined;
   });
 }

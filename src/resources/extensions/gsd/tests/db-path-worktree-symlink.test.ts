@@ -94,11 +94,11 @@ const dynamicToolsSrc = readFileSync(
   "utf-8",
 );
 
-// ensureDbOpen should return a structured result, not just boolean false
-// Check that the catch block provides diagnostic information
+// ensureDbOpen should surface diagnostic context, not just boolean false
+// Check that the catch block logs error details via workflow-logger
 assertTrue(
-  dynamicToolsSrc.includes("resolvedPath") || dynamicToolsSrc.includes("diagnostic"),
-  "ensureDbOpen catch block surfaces diagnostic information (resolvedPath or diagnostic) instead of bare false (#2517)",
+  dynamicToolsSrc.includes("ensureDbOpen failed") && dynamicToolsSrc.includes("logWarning"),
+  "ensureDbOpen catch block surfaces diagnostic information via logWarning instead of bare false (#2517)",
 );
 
 // ── Part 3: post-unit does NOT artifact-retry on db_unavailable ──────────

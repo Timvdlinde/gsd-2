@@ -42,6 +42,7 @@ import { join, resolve } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { debugCount, debugTime } from './debug-logger.js';
 import { extractVerdict } from './verdict-parser.js';
+import { logWarning, logError } from './workflow-logger.js';
 
 import {
   isDbAvailable,
@@ -229,14 +230,31 @@ export async function deriveState(basePath: string): Promise<GSDState> {
 
   // Dual-path: try DB-backed derivation first when hierarchy tables are populated
   if (isDbAvailable()) {
-    const dbMilestones = getAllMilestones();
+    let dbMilestones = getAllMilestones();
+
+    // Disk→DB reconciliation when DB is empty but disk has milestones (#2631).
+    // deriveStateFromDb() does its own reconciliation, but deriveState() skips
+    // it entirely when the DB is empty. Sync here so the DB path is used when
+    // disk milestones exist but haven't been migrated yet.
+    if (dbMilestones.length === 0) {
+      const diskIds = findMilestoneIds(basePath);
+      let synced = false;
+      for (const diskId of diskIds) {
+        if (!isGhostMilestone(basePath, diskId)) {
+          insertMilestone({ id: diskId, status: 'active' });
+          synced = true;
+        }
+      }
+      if (synced) dbMilestones = getAllMilestones();
+    }
+
     if (dbMilestones.length > 0) {
       const stopDbTimer = debugTime("derive-state-db");
       result = await deriveStateFromDb(basePath);
       stopDbTimer({ phase: result.phase, milestone: result.activeMilestone?.id });
       _telemetry.dbDeriveCount++;
     } else {
-      // DB open but empty hierarchy tables — pre-migration project, use filesystem
+      // DB open but no milestones on disk either — use filesystem path
       result = await _deriveStateImpl(basePath);
       _telemetry.markdownDeriveCount++;
     }
@@ -277,7 +295,7 @@ function extractContextTitle(content: string | null, fallback: string): string {
  * Helper: check if a DB status counts as "done" (handles K002 ambiguity).
  */
 function isStatusDone(status: string): boolean {
-  return status === 'complete' || status === 'done';
+  return status === 'complete' || status === 'done' || status === 'skipped';
 }
 
 /**
@@ -704,15 +722,11 @@ export async function deriveStateFromDb(basePath: string): Promise<GSDState> {
     if (summaryPath && existsSync(summaryPath)) {
       try {
         updateTaskStatus(activeMilestone.id, activeSlice.id, t.id, "complete");
-        process.stderr.write(
-          `gsd-reconcile: task ${activeMilestone.id}/${activeSlice.id}/${t.id} had SUMMARY on disk but DB status was "${t.status}" — updated to "complete" (#2514)\n`,
-        );
+        logWarning("reconcile", `task ${activeMilestone.id}/${activeSlice.id}/${t.id} status reconciled from "${t.status}" to "complete" (#2514)`, { mid: activeMilestone.id, sid: activeSlice.id, tid: t.id });
         reconciled = true;
       } catch (e) {
         // DB write failed — continue with stale status rather than crash
-        process.stderr.write(
-          `gsd-reconcile: failed to update task ${t.id}: ${(e as Error).message}\n`,
-        );
+        logError("reconcile", `failed to update task ${t.id}`, { tid: t.id, error: (e as Error).message });
       }
     }
   }
@@ -1367,9 +1381,7 @@ export async function _deriveStateImpl(basePath: string): Promise<GSDState> {
     const summaryPath = resolveTaskFile(basePath, activeMilestone.id, activeSlice.id, t.id, "SUMMARY");
     if (summaryPath && existsSync(summaryPath)) {
       t.done = true;
-      process.stderr.write(
-        `gsd-reconcile: task ${activeMilestone.id}/${activeSlice.id}/${t.id} has SUMMARY on disk but plan shows incomplete — marking done (#2514)\n`,
-      );
+      logWarning("reconcile", `task ${activeMilestone.id}/${activeSlice.id}/${t.id} reconciled via SUMMARY on disk (#2514)`, { mid: activeMilestone.id, sid: activeSlice.id, tid: t.id });
     }
   }
 

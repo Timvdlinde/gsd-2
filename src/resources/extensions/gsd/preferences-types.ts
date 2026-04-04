@@ -21,6 +21,13 @@ import type {
   GateEvaluationConfig,
 } from "./types.js";
 import type { DynamicRoutingConfig } from "./model-router.js";
+
+export interface ContextManagementConfig {
+  observation_masking?: boolean;          // default: true
+  observation_mask_turns?: number;        // default: 8, range: 1-50
+  compaction_threshold_percent?: number;  // default: 0.70, range: 0.5-0.95
+  tool_result_max_chars?: number;         // default: 800, range: 200-10000
+}
 import type { GitHubSyncConfig } from "../github-sync/types.js";
 
 // ─── Workflow Modes ──────────────────────────────────────────────────────────
@@ -93,7 +100,10 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "service_tier",
   "forensics_dedup",
   "show_token_cost",
+  "stale_commit_threshold_minutes",
+  "context_management",
   "experimental",
+  "codebase",
 ]);
 
 /** Canonical list of all dispatch unit types. */
@@ -202,6 +212,16 @@ export interface ExperimentalPreferences {
   rtk?: boolean;
 }
 
+/** Configuration for the codebase map generator (/gsd codebase). */
+export interface CodebaseMapPreferences {
+  /** Additional directory/file patterns to exclude (e.g. ["docs/", "fixtures/"]). Merged with built-in defaults. */
+  exclude_patterns?: string[];
+  /** Max files to include in the map. Default: 500. */
+  max_files?: number;
+  /** Files-per-directory threshold before collapsing to a summary line. Default: 20. */
+  collapse_threshold?: number;
+}
+
 export interface GSDPreferences {
   version?: number;
   mode?: WorkflowMode;
@@ -226,6 +246,7 @@ export interface GSDPreferences {
   post_unit_hooks?: PostUnitHookConfig[];
   pre_dispatch_hooks?: PreDispatchHookConfig[];
   dynamic_routing?: DynamicRoutingConfig;
+  context_management?: ContextManagementConfig;
   token_profile?: TokenProfile;
   phases?: PhaseSkipPreferences;
   auto_visualize?: boolean;
@@ -254,10 +275,19 @@ export interface GSDPreferences {
   /** Opt-in: show per-prompt and cumulative session token cost in the footer. Default: false. */
   show_token_cost?: boolean;
   /**
+   * Minutes without a commit before flagging uncommitted changes as stale.
+   * When the threshold is exceeded and the working tree is dirty, doctor will
+   * auto-commit a safety snapshot tagged with `[gsd safety]`. Default: 30.
+   * Set to 0 to disable.
+   */
+  stale_commit_threshold_minutes?: number;
+  /**
    * Opt-in experimental features. All features here are disabled by default.
    * See the preferences reference for details on each feature.
    */
   experimental?: ExperimentalPreferences;
+  /** Configuration for the codebase map generator (/gsd codebase). */
+  codebase?: CodebaseMapPreferences;
 }
 
 export interface LoadedGSDPreferences {

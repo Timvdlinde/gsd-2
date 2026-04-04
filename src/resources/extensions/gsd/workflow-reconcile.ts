@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { mkdirSync, existsSync, readFileSync, unlinkSync } from "node:fs";
+import { logWarning, logError } from "./workflow-logger.js";
 import { readEvents, findForkPoint, appendEvent, getSessionId } from "./workflow-events.js";
 import type { WorkflowEvent } from "./workflow-events.js";
 import {
@@ -308,9 +309,7 @@ export function reconcileWorktreeLogs(
   // Acquire advisory lock to prevent concurrent reconcile + append races
   const lock = acquireSyncLock(mainBasePath);
   if (!lock.acquired) {
-    process.stderr.write(
-      `[gsd] reconcile: could not acquire sync lock — another reconciliation may be in progress\n`,
-    );
+    logWarning("reconcile", "could not acquire sync lock — another reconciliation may be in progress");
     return { autoMerged: 0, conflicts: [] };
   }
 
@@ -349,9 +348,7 @@ function _reconcileWorktreeLogsInner(
   if (conflicts.length > 0) {
     // D-04: atomic all-or-nothing — block entire merge
     writeConflictsFile(mainBasePath, conflicts, worktreeBasePath);
-    process.stderr.write(
-      `[gsd] reconcile: ${conflicts.length} conflict(s) detected — see ${join(mainBasePath, ".gsd", "CONFLICTS.md")}\n`,
-    );
+    logError("reconcile", `${conflicts.length} conflict(s) detected`, { count: String(conflicts.length), path: join(mainBasePath, ".gsd", "CONFLICTS.md") });
     return { autoMerged: 0, conflicts };
   }
 
@@ -375,9 +372,7 @@ function _reconcileWorktreeLogsInner(
   try {
     writeManifest(mainBasePath);
   } catch (err) {
-    process.stderr.write(
-      `[gsd] reconcile: manifest write failed (non-fatal): ${(err as Error).message}\n`,
-    );
+    logWarning("reconcile", "manifest write failed (non-fatal)", { error: (err as Error).message });
   }
 
   return { autoMerged: merged.length, conflicts: [] };
@@ -460,8 +455,8 @@ function parseEventBlock(block: string): WorkflowEvent[] {
           if (paramsMatch) {
             try {
               params = JSON.parse(paramsMatch[1]!) as Record<string, unknown>;
-            } catch {
-              // Keep empty params on parse error
+            } catch (e) {
+              logWarning("reconcile", `tool call params parse failed: ${(e as Error).message}`);
             }
             i++; // consume params line
           }

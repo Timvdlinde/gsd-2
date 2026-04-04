@@ -66,6 +66,7 @@ import {
   isDebugEnabled,
   getDebugLogPath,
 } from "./debug-logger.js";
+import { logWarning, logError } from "./workflow-logger.js";
 import { parseUnitId } from "./unit-id.js";
 import type { AutoSession } from "./auto/session.js";
 import {
@@ -112,8 +113,9 @@ async function openProjectDbIfPresent(basePath: string): Promise<void> {
   try {
     const { openDatabase } = await import("./gsd-db.js");
     openDatabase(gsdDbPath);
-  } catch {
+  } catch (err) {
     /* non-fatal — DB lifecycle block below will retry */
+    logWarning("engine", `DB open failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -213,8 +215,9 @@ export async function bootstrapAutoSession(
       try {
         nativeAddAll(base);
         nativeCommit(base, "chore: init gsd");
-      } catch {
+      } catch (err) {
         /* nothing to commit */
+        logWarning("engine", `mkdir failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -575,9 +578,7 @@ export async function bootstrapAutoSession(
           migrateFromMarkdown(s.basePath);
         }
       } catch (err) {
-        process.stderr.write(
-          `gsd-migrate: auto-migration failed: ${(err as Error).message}\n`,
-        );
+        logError("engine", `auto-migration failed: ${(err as Error).message}`);
       }
     }
     if (existsSync(gsdDbPath) && !isDbAvailable()) {
@@ -585,9 +586,7 @@ export async function bootstrapAutoSession(
         const { openDatabase: openDb } = await import("./gsd-db.js");
         openDb(gsdDbPath);
       } catch (err) {
-        process.stderr.write(
-          `gsd-db: failed to open existing database: ${(err as Error).message}\n`,
-        );
+        logError("engine", `failed to open existing database: ${(err as Error).message}`);
       }
     }
 
@@ -724,8 +723,9 @@ export async function bootstrapAutoSession(
           }
         }
       }
-    } catch {
+    } catch (err) {
       /* non-fatal */
+      logWarning("engine", `preflight validation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return true;
@@ -735,3 +735,4 @@ export async function bootstrapAutoSession(
     throw err;
   }
 }
+

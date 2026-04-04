@@ -15,6 +15,7 @@ import { parseRoadmap as parseLegacyRoadmap, parsePlan as parseLegacyPlan } from
 import { isDbAvailable, getTask, getSlice, getSliceTasks, updateTaskStatus } from "./gsd-db.js";
 import { isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
+import { logWarning, logError } from "./workflow-logger.js";
 import {
   nativeConflictFiles,
   nativeCommit,
@@ -72,7 +73,8 @@ export function hasImplementationArtifacts(basePath: string): boolean {
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf-8",
       });
-    } catch {
+    } catch (e) {
+      logWarning("recovery", `git rev-parse check failed: ${(e as Error).message}`);
       return true;
     }
 
@@ -92,8 +94,9 @@ export function hasImplementationArtifacts(basePath: string): boolean {
     // implementation code (#1703).
     const implFiles = changedFiles.filter(f => !f.startsWith(".gsd/") && !f.startsWith(".gsd\\"));
     return implFiles.length > 0;
-  } catch {
+  } catch (e) {
     // Non-fatal — if git operations fail, don't block the pipeline
+    logWarning("recovery", `implementation artifact check failed: ${(e as Error).message}`);
     return true;
   }
 }
@@ -109,8 +112,9 @@ function detectMainBranch(basePath: string): string {
       encoding: "utf-8",
     });
     if (result.trim()) return "main";
-  } catch {
-    // main doesn't exist
+  } catch (_) {
+    // Expected — main doesn't exist, try master next
+    void _;
   }
   try {
     const result = execFileSync("git", ["rev-parse", "--verify", "master"], {
@@ -119,10 +123,13 @@ function detectMainBranch(basePath: string): string {
       encoding: "utf-8",
     });
     if (result.trim()) return "master";
-  } catch {
-    // master doesn't exist either
+  } catch (_) {
+    // Expected — master doesn't exist either
+    void _;
   }
-  return "main"; // default fallback
+  // Neither main nor master found — warn and fall back
+  logWarning("recovery", "neither main nor master branch found, defaulting to main");
+  return "main";
 }
 
 /**
@@ -144,8 +151,9 @@ function getChangedFilesSinceBranch(basePath: string, targetBranch: string): str
       ).trim();
       return result ? result.split("\n").filter(Boolean) : [];
     }
-  } catch {
+  } catch (err) {
     // merge-base failed — fall back
+    logWarning("recovery", `merge-base detection failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Fallback: check last 20 commits
@@ -155,7 +163,8 @@ function getChangedFilesSinceBranch(basePath: string, targetBranch: string): str
       { cwd: basePath, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" },
     ).trim();
     return result ? [...new Set(result.split("\n").filter(Boolean))] : [];
-  } catch {
+  } catch (e) {
+    logWarning("recovery", `git log fallback failed: ${(e as Error).message}`);
     return [];
   }
 }
@@ -246,8 +255,9 @@ export function verifyExpectedArtifact(
       for (const gid of gateIds) {
         if (pendingIds.has(gid)) return false;
       }
-    } catch {
+    } catch (err) {
       // DB unavailable — treat as verified to avoid blocking
+      logWarning("recovery", `gate-evaluate DB check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return true;
   }
@@ -335,8 +345,9 @@ export function verifyExpectedArtifact(
             }
           }
         }
-      } catch {
+      } catch (err) {
         // Parse failure — don't block; slice plan may have non-standard format
+        logWarning("recovery", `plan-slice task plan verification failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
@@ -366,7 +377,8 @@ export function verifyExpectedArtifact(
             const roadmap = parseLegacyRoadmap(roadmapContent);
             const slice = roadmap.slices.find((s) => s.id === sid);
             if (slice && !slice.done) return false;
-          } catch {
+          } catch (e) {
+            logWarning("recovery", `roadmap parse failed: ${(e as Error).message}`);
             return false;
           }
         }
@@ -418,7 +430,9 @@ export function writeBlockerPlaceholder(
   if (unitType === "execute-task" && isDbAvailable()) {
     const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
     if (mid && sid && tid) {
-      try { updateTaskStatus(mid, sid, tid, "complete", new Date().toISOString()); } catch { /* non-fatal */ }
+      try { updateTaskStatus(mid, sid, tid, "complete", new Date().toISOString()); } catch (err) { /* non-fatal */
+        logError("recovery", `DB status update failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
@@ -439,20 +453,23 @@ function abortAndResetMerge(
   if (hasMergeHead) {
     try {
       nativeMergeAbort(basePath);
-    } catch {
+    } catch (err) {
       /* best-effort */
+      logWarning("recovery", `git merge-abort failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   } else if (squashMsgPath) {
     try {
       unlinkSync(squashMsgPath);
-    } catch {
+    } catch (err) {
       /* best-effort */
+      logWarning("recovery", `file unlink failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   try {
     nativeResetHard(basePath);
-  } catch {
+  } catch (err) {
     /* best-effort */
+    logError("recovery", `git reset failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -500,7 +517,8 @@ export function reconcileMergeState(
       try {
         nativeCheckoutTheirs(basePath, gsdConflicts);
         nativeAddPaths(basePath, gsdConflicts);
-      } catch {
+      } catch (e) {
+        logError("recovery", `auto-resolve .gsd/ conflicts failed: ${(e as Error).message}`);
         resolved = false;
       }
       if (resolved) {
@@ -513,7 +531,8 @@ export function reconcileMergeState(
             `Auto-resolved ${gsdConflicts.length} .gsd/ state file conflict(s) from prior merge.`,
             "info",
           );
-        } catch {
+        } catch (e) {
+          logError("recovery", `auto-commit .gsd/ conflict resolution failed: ${(e as Error).message}`);
           resolved = false;
         }
       }
@@ -592,3 +611,4 @@ export function buildLoopRemediationSteps(
   }
   return null;
 }
+

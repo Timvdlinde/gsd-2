@@ -428,6 +428,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		unregisterProvider: (name) => {
 			runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((r) => r.name !== name);
 		},
+		// Stub replaced by ExtensionRunner at construction time via bindEmitMethods().
+		emitBeforeModelSelect: async () => undefined,
 	};
 
 	return runtime;
@@ -577,6 +579,10 @@ function createExtensionAPI(
 
 		unregisterProvider(name: string) {
 			runtime.unregisterProvider(name);
+		},
+
+		async emitBeforeModelSelect(event: Omit<import("./types.js").BeforeModelSelectEvent, "type">): Promise<import("./types.js").BeforeModelSelectResult | undefined> {
+			return runtime.emitBeforeModelSelect(event);
 		},
 
 		events: eventBus,
@@ -941,6 +947,11 @@ function discoverExtensionsInDir(dir: string): string[] {
 
 /**
  * Discover and load extensions from standard locations.
+ *
+ * @deprecated Use DefaultResourceLoader.reload() instead — this function is
+ * not called in the GSD loading flow. Extension discovery happens through
+ * DefaultPackageManager.resolve() → addAutoDiscoveredResources(). Kept for
+ * backwards compatibility with direct pi-coding-agent consumers.
  */
 export async function discoverAndLoadExtensions(
 	configuredPaths: string[],

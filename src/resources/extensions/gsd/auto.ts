@@ -115,7 +115,7 @@ import {
   formatCost,
   formatTokenCount,
 } from "./metrics.js";
-import { setLogBasePath } from "./workflow-logger.js";
+import { setLogBasePath, logWarning, logError } from "./workflow-logger.js";
 import { join } from "node:path";
 import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { atomicWriteSync } from "./atomic-write.js";
@@ -316,8 +316,9 @@ export function getAutoDashboardData(): AutoDashboardData {
     if (s.basePath) {
       pendingCaptureCount = countPendingCaptures(s.basePath);
     }
-  } catch {
+  } catch (err) {
     // Non-fatal — captures module may not be loaded
+    logWarning("engine", `capture count failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
   }
   return {
     active: s.active,
@@ -565,8 +566,9 @@ function cleanupAfterLoopExit(ctx: ExtensionContext): void {
   try {
     if (lockBase()) clearLock(lockBase());
     if (lockBase()) releaseSessionLock(lockBase());
-  } catch {
+  } catch (err) {
     /* best-effort — mirror stopAuto cleanup */
+    logWarning("session", `lock cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
   }
 
   ctx.ui.setStatus("gsd-auto", undefined);
@@ -578,8 +580,9 @@ function cleanupAfterLoopExit(ctx: ExtensionContext): void {
     s.basePath = s.originalBasePath;
     try {
       process.chdir(s.basePath);
-    } catch {
+    } catch (err) {
       /* best-effort */
+      logWarning("engine", `chdir failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
   }
 }
@@ -651,8 +654,9 @@ export async function stopAuto(
           } else {
             milestoneComplete = true;
           }
-        } catch {
+        } catch (err) {
           // Non-fatal — fall through to preserveBranch path
+          logWarning("engine", `milestone summary check failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
         }
 
         if (milestoneComplete) {
@@ -687,8 +691,9 @@ export async function stopAuto(
         s.basePath = s.originalBasePath;
         try {
           process.chdir(s.basePath);
-        } catch {
+        } catch (err) {
           /* best-effort */
+          logWarning("engine", `chdir failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
         }
       }
     } catch (e) {
@@ -760,7 +765,9 @@ export async function stopAuto(
     try {
       const pausedPath = join(gsdRoot(s.originalBasePath || s.basePath), "runtime", "paused-session.json");
       if (existsSync(pausedPath)) unlinkSync(pausedPath);
-    } catch { /* non-fatal */ }
+    } catch (err) { /* non-fatal */
+      logWarning("engine", `file unlink failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
 
     // ── Step 13: Restore original model (before reset clears IDs) ──
     try {
@@ -794,7 +801,9 @@ export async function stopAuto(
         const { closeBrowser } = await import("../browser-tools/lifecycle.js");
         await closeBrowser();
       }
-    } catch { /* non-fatal: browser-tools may not be loaded */ }
+    } catch (err) { /* non-fatal: browser-tools may not be loaded */
+      logWarning("engine", `browser teardown failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
 
     // External cleanup (not covered by session reset)
     clearInFlightTools();
@@ -852,16 +861,18 @@ export async function pauseAuto(
       JSON.stringify(pausedMeta, null, 2),
       "utf-8",
     );
-  } catch {
+  } catch (err) {
     // Non-fatal — resume will still work via full bootstrap, just without worktree context
+    logWarning("engine", `paused-session file write failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
   }
 
   // Close out the current unit so its runtime record doesn't stay at "dispatched"
   if (s.currentUnit && ctx) {
     try {
       await closeoutUnit(ctx, s.basePath, s.currentUnit.type, s.currentUnit.id, s.currentUnit.startedAt);
-    } catch {
+    } catch (err) {
       // Non-fatal — best-effort closeout on pause
+      logWarning("engine", `unit closeout on pause failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
     s.currentUnit = null;
   }
@@ -1085,7 +1096,9 @@ export async function startAuto(
           s.originalBasePath = meta.originalBasePath || base;
           s.stepMode = meta.stepMode ?? requestedStepMode;
           s.paused = true;
-          try { unlinkSync(pausedPath); } catch { /* non-fatal */ }
+          try { unlinkSync(pausedPath); } catch (err) { /* non-fatal */
+            logWarning("session", `pause file cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+          }
           ctx.ui.notify(
             `Resuming paused custom workflow${meta.activeRunDir ? ` (${meta.activeRunDir})` : ""}.`,
             "info",
@@ -1096,7 +1109,9 @@ export async function startAuto(
           const summaryFile = resolveMilestoneFile(base, meta.milestoneId, "SUMMARY");
           if (!mDir || summaryFile) {
             // Stale milestone — clean up and fall through to fresh bootstrap
-            try { unlinkSync(pausedPath); } catch { /* non-fatal */ }
+            try { unlinkSync(pausedPath); } catch (err) { /* non-fatal */
+            logWarning("session", `pause file cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+          }
             ctx.ui.notify(
               `Paused milestone ${meta.milestoneId} is ${!mDir ? "missing" : "already complete"}. Starting fresh.`,
               "info",
@@ -1107,7 +1122,9 @@ export async function startAuto(
             s.stepMode = meta.stepMode ?? requestedStepMode;
             s.paused = true;
             // Clean up the persisted file — we're consuming it
-            try { unlinkSync(pausedPath); } catch { /* non-fatal */ }
+            try { unlinkSync(pausedPath); } catch (err) { /* non-fatal */
+            logWarning("session", `pause file cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+          }
             ctx.ui.notify(
               `Resuming paused session for ${meta.milestoneId}${meta.worktreePath ? ` (worktree)` : ""}.`,
               "info",
@@ -1115,8 +1132,9 @@ export async function startAuto(
           }
         }
       }
-    } catch {
+    } catch (err) {
       // Malformed or missing — proceed with fresh bootstrap
+      logWarning("session", `paused-session restore failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
   }
 
@@ -1242,8 +1260,9 @@ export async function startAuto(
 
   try {
     syncCmuxSidebar(loadEffectiveGSDPreferences()?.preferences, await deriveState(s.basePath));
-  } catch {
+  } catch (err) {
     // Best-effort only — sidebar sync must never block auto-mode startup
+    logWarning("engine", `cmux sync failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
   }
   logCmuxEvent(loadEffectiveGSDPreferences()?.preferences, requestedStepMode ? "Step-mode started." : "Auto-mode started.", "progress");
 
@@ -1415,8 +1434,9 @@ export async function dispatchHookUnit(
     if (match) {
       try {
         await pi.setModel(match);
-      } catch {
+      } catch (err) {
         /* non-fatal */
+        logWarning("dispatch", `hook model set failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
       }
     } else {
       ctx.ui.notify(
@@ -1453,7 +1473,9 @@ export async function dispatchHookUnit(
   ctx.ui.notify(`Running post-unit hook: ${hookName}`, "info");
 
   // Ensure cwd matches basePath before hook dispatch (#1389)
-  try { if (process.cwd() !== s.basePath) process.chdir(s.basePath); } catch {}
+  try { if (process.cwd() !== s.basePath) process.chdir(s.basePath); } catch (err) {
+    logWarning("engine", `chdir failed before hook dispatch: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+  }
 
   debugLog("dispatchHookUnit", {
     phase: "send-message",
@@ -1475,3 +1497,4 @@ export {
   buildLoopRemediationSteps,
 } from "./auto-recovery.js";
 export { resolveExpectedArtifactPath } from "./auto-artifact-paths.js";
+

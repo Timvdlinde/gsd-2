@@ -26,6 +26,8 @@ import { existsSync } from "node:fs";
 import { computeBudgets, resolveExecutorContextWindow, truncateAtSectionBoundary } from "./context-budget.js";
 import { getPendingGates } from "./gsd-db.js";
 import { formatDecisionsCompact, formatRequirementsCompact } from "./structured-data-formatter.js";
+import { readPhaseAnchor, formatAnchorForPrompt } from "./phase-anchor.js";
+import { logWarning } from "./workflow-logger.js";
 
 // ─── Preamble Cap ─────────────────────────────────────────────────────────────
 
@@ -48,7 +50,8 @@ function formatExecutorConstraints(): string {
   try {
     const prefs = loadEffectiveGSDPreferences();
     windowTokens = resolveExecutorContextWindow(undefined, prefs?.preferences);
-  } catch {
+  } catch (e) {
+    logWarning("prompt", `resolveExecutorContextWindow failed: ${(e as Error).message}`);
     windowTokens = 200_000; // safe default
   }
   const budgets = computeBudgets(windowTokens);
@@ -197,7 +200,9 @@ export async function inlineDependencySummaries(
       }
       // If slice not found in DB, fall through to file-based parsing
     }
-  } catch { /* fall through */ }
+  } catch (err) {
+    logWarning("prompt", `inlineDependencySummaries DB lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // If DB didn't provide depends, fall back to roadmap parsing
   if (!depends) {
@@ -275,8 +280,8 @@ export async function inlineDecisionsFromDb(
         return `### Decisions\nSource: \`.gsd/DECISIONS.md\`\n\n${formatted}`;
       }
     }
-  } catch {
-    // DB not available — fall through to filesystem
+  } catch (err) {
+    logWarning("prompt", `inlineDecisionsFromDb failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return inlineGsdRootFile(base, "decisions.md", "Decisions");
 }
@@ -302,8 +307,8 @@ export async function inlineRequirementsFromDb(
         return `### Requirements\nSource: \`.gsd/REQUIREMENTS.md\`\n\n${formatted}`;
       }
     }
-  } catch {
-    // DB not available — fall through to filesystem
+  } catch (err) {
+    logWarning("prompt", `inlineRequirementsFromDb failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return inlineGsdRootFile(base, "requirements.md", "Requirements");
 }
@@ -324,8 +329,8 @@ export async function inlineProjectFromDb(
         return `### Project\nSource: \`.gsd/PROJECT.md\`\n\n${content}`;
       }
     }
-  } catch {
-    // DB not available — fall through to filesystem
+  } catch (err) {
+    logWarning("prompt", `inlineProjectFromDb failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return inlineGsdRootFile(base, "project.md", "Project");
 }
@@ -485,8 +490,8 @@ export function buildSkillActivationBlock(params: {
       for (const skillName of taskPlan.frontmatter.skills_used) {
         matched.add(normalizeSkillReference(skillName));
       }
-    } catch {
-      // Non-fatal — malformed task plan should not break prompt construction
+    } catch (err) {
+      logWarning("prompt", `parseTaskPlanFile failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -735,7 +740,9 @@ export async function checkNeedsReassessment(
         return { sliceId: lastCompleted };
       }
     }
-  } catch { /* fall through */ }
+  } catch (err) {
+    logWarning("prompt", `checkNeedsReassessment DB lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // File-based fallback using roadmap checkboxes
   const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
@@ -801,7 +808,9 @@ export async function checkNeedsRunUat(
         return { sliceId: sid, uatType };
       }
     }
-  } catch { /* fall through */ }
+  } catch (err) {
+    logWarning("prompt", `checkNeedsRunUat DB lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // File-based fallback using roadmap checkboxes
   if (!prefs?.uat_dispatch) return null;
@@ -906,6 +915,11 @@ export async function buildPlanMilestonePrompt(mid: string, midTitle: string, ba
   const researchRel = relMilestoneFile(base, mid, "RESEARCH");
 
   const inlined: string[] = [];
+
+  // Inject phase handoff anchor from research phase (if available)
+  const researchAnchor = readPhaseAnchor(base, mid, "research-milestone");
+  if (researchAnchor) inlined.push(formatAnchorForPrompt(researchAnchor));
+
   inlined.push(await inlineFile(contextPath, contextRel, "Milestone Context"));
   const researchInline = await inlineFileOptional(researchPath, researchRel, "Milestone Research");
   if (researchInline) inlined.push(researchInline);
@@ -1033,6 +1047,11 @@ export async function buildPlanSlicePrompt(
   const researchRel = relSliceFile(base, mid, sid, "RESEARCH");
 
   const inlined: string[] = [];
+
+  // Inject phase handoff anchor from research phase (if available)
+  const researchSliceAnchor = readPhaseAnchor(base, mid, "research-slice");
+  if (researchSliceAnchor) inlined.push(formatAnchorForPrompt(researchSliceAnchor));
+
   inlined.push(await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap"));
   const researchInline = await inlineFileOptional(researchPath, researchRel, "Slice Research");
   if (researchInline) inlined.push(researchInline);
@@ -1099,6 +1118,9 @@ export async function buildExecuteTaskPrompt(
     ? level
     : { level: level as InlineLevel | undefined };
   const inlineLevel = opts.level ?? resolveInlineLevel();
+
+  // Inject phase handoff anchor from planning phase (if available)
+  const planAnchor = readPhaseAnchor(base, mid, "plan-slice");
 
   const priorSummaries = opts.carryForwardPaths ?? await getPriorTaskSummaryPaths(mid, sid, tid, base);
   const priorLines = priorSummaries.length > 0
@@ -1190,9 +1212,12 @@ export async function buildExecuteTaskPrompt(
     ? `### Runtime Context\nSource: \`.gsd/RUNTIME.md\`\n\n${runtimeContent.trim()}`
     : "";
 
+  const phaseAnchorSection = planAnchor ? formatAnchorForPrompt(planAnchor) : "";
+
   return loadPrompt("execute-task", {
     overridesSection,
     runtimeContext,
+    phaseAnchorSection,
     workingDirectory: base,
     milestoneId: mid, sliceId: sid, sliceTitle: sTitle, taskId: tid, taskTitle: tTitle,
     planPath: join(base, relSliceFile(base, mid, sid, "PLAN")),
@@ -1295,7 +1320,9 @@ export async function buildCompleteMilestonePrompt(
     if (isDbAvailable()) {
       sliceIds = getMilestoneSlices(mid).map(s => s.id);
     }
-  } catch { /* fall through */ }
+  } catch (err) {
+    logWarning("prompt", `buildCompleteMilestonePrompt DB lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   // File-based fallback: parse roadmap for slice IDs when DB has no data
   if (sliceIds.length === 0 && roadmapPath) {
     const roadmapContent = await loadFile(roadmapPath);
@@ -1376,7 +1403,9 @@ export async function buildValidateMilestonePrompt(
         }
       }
     }
-  } catch { /* fall through */ }
+  } catch (err) {
+    logWarning("prompt", `buildValidateMilestonePrompt verification classes lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // Inline all slice summaries and UAT results
   let valSliceIds: string[] = [];
@@ -1385,7 +1414,9 @@ export async function buildValidateMilestonePrompt(
     if (isDbAvailable()) {
       valSliceIds = getMilestoneSlices(mid).map(s => s.id);
     }
-  } catch { /* fall through */ }
+  } catch (err) {
+    logWarning("prompt", `buildValidateMilestonePrompt slice IDs lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   // File-based fallback: parse roadmap for slice IDs when DB has no data
   if (valSliceIds.length === 0 && roadmapPath) {
     const roadmapContent = await loadFile(roadmapPath);
@@ -1524,8 +1555,8 @@ export async function buildReplanSlicePrompt(
         `- **${c.id}**: "${c.text}" — ${c.rationale ?? "no rationale"}`
       ).join("\n");
     }
-  } catch {
-    // Non-fatal — captures module may not be available
+  } catch (err) {
+    logWarning("prompt", `loadReplanCaptures failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return loadPrompt("replan-slice", {
@@ -1625,8 +1656,8 @@ export async function buildReassessRoadmapPrompt(
         `- **${c.id}**: "${c.text}" — ${c.rationale ?? "deferred during triage"}`
       ).join("\n");
     }
-  } catch {
-    // Non-fatal — captures module may not be available
+  } catch (err) {
+    logWarning("prompt", `loadDeferredCaptures failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const reassessCommitInstruction = "Do not commit — .gsd/ planning docs are managed externally and not tracked in git.";
@@ -1842,7 +1873,9 @@ export async function buildRewriteDocsPrompt(
               .filter(t => t.status !== "complete" && t.status !== "done")
               .map(t => ({ id: t.id }));
           }
-        } catch { /* fall through */ }
+        } catch (err) {
+          logWarning("prompt", `buildRewriteDocsPrompt DB task lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
 
         if (!incompleteTasks) {
           // DB unavailable — no task data to inline
@@ -1894,3 +1927,4 @@ export async function buildRewriteDocsPrompt(
     overridesPath: relGsdRootFile("OVERRIDES"),
   });
 }
+

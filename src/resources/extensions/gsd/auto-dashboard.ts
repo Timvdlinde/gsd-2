@@ -31,6 +31,7 @@ import {
   getRtkSessionSavings,
   type RtkSessionSavings,
 } from "../shared/rtk-session-stats.js";
+import { logWarning } from "./workflow-logger.js";
 
 // ─── UAT Slice Extraction ─────────────────────────────────────────────────────
 
@@ -285,8 +286,9 @@ export function updateSliceProgressCache(base: string, mid: string, activeSid?: 
             taskDetails = dbTasks.map(t => ({ id: t.id, title: t.title, done: t.status === "complete" || t.status === "done" }));
           }
         }
-      } catch {
+      } catch (err) {
         // Non-fatal — just omit task count
+        logWarning("dashboard", `operation failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -297,8 +299,9 @@ export function updateSliceProgressCache(base: string, mid: string, activeSid?: 
       activeSliceTasks,
       taskDetails,
     };
-  } catch {
+  } catch (err) {
     // Non-fatal — widget just won't show progress bar
+    logWarning("dashboard", `operation failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -332,8 +335,9 @@ function refreshLastCommit(basePath: string): void {
       };
     }
     lastCommitFetchedAt = Date.now();
-  } catch {
+  } catch (err) {
     // Non-fatal — just skip last commit display
+    logWarning("dashboard", `operation failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -376,7 +380,9 @@ function ensureWidgetModeLoaded(): void {
     if (saved && WIDGET_MODES.includes(saved as WidgetMode)) {
       widgetMode = saved as WidgetMode;
     }
-  } catch { /* non-fatal — use default */ }
+  } catch (err) { /* non-fatal — use default */
+    logWarning("dashboard", `operation failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Persist widget mode to global preferences YAML. */
@@ -395,7 +401,9 @@ function persistWidgetMode(mode: WidgetMode): void {
       content = content.trimEnd() + "\n" + line + "\n";
     }
     writeFileSync(prefsPath, content, "utf-8");
-  } catch { /* non-fatal — mode still set in memory */ }
+  } catch (err) { /* non-fatal — mode still set in memory */
+    logWarning("dashboard", `file write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Cycle to the next widget mode. Returns the new mode. */
@@ -458,7 +466,9 @@ export function updateProgressWidget(
 
   // Cache git branch at widget creation time (not per render)
   let cachedBranch: string | null = null;
-  try { cachedBranch = getCurrentBranch(accessors.getBasePath()); } catch { /* not in git repo */ }
+  try { cachedBranch = getCurrentBranch(accessors.getBasePath()); } catch (err) { /* not in git repo */
+    logWarning("dashboard", `git branch detection failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // Cache short pwd (last 2 path segments only) + worktree/branch info
   let widgetPwd: string;
@@ -495,7 +505,8 @@ export function updateProgressWidget(
         const sessionId = ctx.sessionManager.getSessionId();
         const savings = sessionId ? getRtkSessionSavings(accessors.getBasePath(), sessionId) : null;
         cachedRtkLabel = formatRtkSavingsLabel(savings);
-      } catch {
+      } catch (err) {
+        logWarning("dashboard", `RTK savings lookup failed: ${err instanceof Error ? (err as Error).message : String(err)}`);
         cachedRtkLabel = null;
       }
     };
@@ -519,7 +530,9 @@ export function updateProgressWidget(
         }
         refreshRtkLabel();
         cachedLines = undefined;
-      } catch { /* non-fatal */ }
+      } catch (err) { /* non-fatal */
+        logWarning("dashboard", `DB status update failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }, 15_000);
 
     return {
@@ -568,6 +581,13 @@ export function updateProgressWidget(
             : theme.fg("dim", elapsed))
           : "";
         lines.push(rightAlign(headerLeft, headerRight, width));
+
+        // Worktree/branch right-aligned below header
+        if (worktreeName && cachedBranch) {
+          lines.push(rightAlign("", theme.fg("dim", `${worktreeName} (${cachedBranch})`), width));
+        } else if (cachedBranch) {
+          lines.push(rightAlign("", theme.fg("dim", cachedBranch), width));
+        }
 
         // Show health signal details when degraded (yellow/red)
         if (score.level !== "green" && score.signals.length > 0 && widgetMode !== "min") {
@@ -682,12 +702,12 @@ export function updateProgressWidget(
         const hasContext = !!(mid || (slice && unitType !== "research-milestone" && unitType !== "plan-milestone"));
         if (mid) {
           const modelTag = modelDisplay ? theme.fg("muted", `  ${modelDisplay}`) : "";
-          lines.push(truncateToWidth(`${pad}${theme.fg("dim", mid.title)}${modelTag}`, width));
+          lines.push(truncateToWidth(`${pad}${theme.fg("dim", mid.title)}${modelTag}`, width, "…"));
         }
         if (slice && unitType !== "research-milestone" && unitType !== "plan-milestone") {
           lines.push(truncateToWidth(
             `${pad}${theme.fg("text", theme.bold(`${slice.id}: ${slice.title}`))}`,
-            width,
+            width, "…",
           ));
         }
         if (hasContext) lines.push("");
@@ -733,6 +753,12 @@ export function updateProgressWidget(
         const rightLines: string[] = [];
         const maxVisibleTasks = 8;
 
+        // Max visible chars for task title text (before ANSI theming)
+        const maxTaskTitleLen = 45;
+        function truncTitle(s: string): string {
+          return s.length > maxTaskTitleLen ? s.slice(0, maxTaskTitleLen - 1) + "…" : s;
+        }
+
         function formatTaskLine(t: { id: string; title: string; done: boolean }, isCurrent: boolean): string {
           const glyph = t.done
             ? theme.fg("success", "*")
@@ -744,11 +770,12 @@ export function updateProgressWidget(
             : t.done
               ? theme.fg("muted", t.id)
               : theme.fg("dim", t.id);
+          const short = truncTitle(t.title);
           const title = isCurrent
-            ? theme.fg("text", t.title)
+            ? theme.fg("text", short)
             : t.done
-              ? theme.fg("muted", t.title)
-              : theme.fg("text", t.title);
+              ? theme.fg("muted", short)
+              : theme.fg("text", short);
           return `${glyph} ${id}: ${title}`;
         }
 
@@ -771,7 +798,7 @@ export function updateProgressWidget(
           if (maxRows > 0) {
             lines.push("");
             for (let i = 0; i < maxRows; i++) {
-              const left = padToWidth(truncateToWidth(leftLines[i] ?? "", leftColWidth), leftColWidth);
+              const left = padToWidth(truncateToWidth(leftLines[i] ?? "", leftColWidth, "…"), leftColWidth);
               const right = rightLines[i] ?? "";
               lines.push(`${left}${right}`);
             }
@@ -779,7 +806,7 @@ export function updateProgressWidget(
         } else {
           if (leftLines.length > 0) {
             lines.push("");
-            for (const l of leftLines) lines.push(truncateToWidth(l, width));
+            for (const l of leftLines) lines.push(truncateToWidth(l, width, "…"));
           }
         }
 
@@ -808,23 +835,27 @@ export function updateProgressWidget(
             lines.push(rightAlign("", theme.fg("dim", cachedRtkLabel), width));
           }
         }
-        // PWD line with last commit info right-aligned
+        // Last commit info
         const lastCommit = getLastCommit(accessors.getBasePath());
-        const commitStr = lastCommit
-          ? theme.fg("dim", `${lastCommit.timeAgo} ago: ${lastCommit.message}`)
+        const maxCommitLen = 65;
+        const commitMsg = lastCommit
+          ? lastCommit.message.length > maxCommitLen
+            ? lastCommit.message.slice(0, maxCommitLen - 1) + "…"
+            : lastCommit.message
           : "";
-        const pwdStr = theme.fg("dim", widgetPwd);
-        if (commitStr) {
-          lines.push(rightAlign(`${pad}${pwdStr}`, truncateToWidth(commitStr, Math.floor(width * 0.45)), width));
-        } else {
-          lines.push(`${pad}${pwdStr}`);
-        }
         // Hints line
         const hintParts: string[] = [];
         hintParts.push("esc pause");
         hintParts.push(process.platform === "darwin" ? "⌃⌥G dashboard" : "Ctrl+Alt+G dashboard");
         const hintStr = theme.fg("dim", hintParts.join(" | "));
-        lines.push(rightAlign("", hintStr, width));
+        const commitStr = lastCommit
+          ? theme.fg("dim", `${lastCommit.timeAgo} ago: ${commitMsg}`)
+          : "";
+        if (commitStr) {
+          lines.push(rightAlign(`${pad}${commitStr}`, hintStr, width));
+        } else {
+          lines.push(rightAlign("", hintStr, width));
+        }
 
         lines.push(...ui.bar());
 
@@ -851,12 +882,13 @@ function rightAlign(left: string, right: string, width: number): string {
   const leftVis = visibleWidth(left);
   const rightVis = visibleWidth(right);
   const gap = Math.max(1, width - leftVis - rightVis);
-  return truncateToWidth(left + " ".repeat(gap) + right, width);
+  return truncateToWidth(left + " ".repeat(gap) + right, width, "…");
 }
 
 /** Pad a string with trailing spaces to fill exactly `colWidth` (ANSI-aware). */
 function padToWidth(s: string, colWidth: number): string {
   const vis = visibleWidth(s);
-  if (vis >= colWidth) return truncateToWidth(s, colWidth);
+  if (vis >= colWidth) return truncateToWidth(s, colWidth, "…");
   return s + " ".repeat(colWidth - vis);
 }
+
