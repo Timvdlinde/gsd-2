@@ -467,6 +467,19 @@ if (isPrintMode) {
   // registry, causing the user's valid choice to be silently overwritten.
   validateConfiguredModel(modelRegistry, settingsManager)
 
+  // Re-apply the validated model to the session. findInitialModel() may have picked
+  // a fallback if extension models weren't yet registered at that point (#3534).
+  {
+    const validatedProvider = settingsManager.getDefaultProvider()
+    const validatedModelId = settingsManager.getDefaultModel()
+    if (validatedProvider && validatedModelId) {
+      const correctModel = modelRegistry.find(validatedProvider, validatedModelId)
+      if (correctModel) {
+        session.setModel(correctModel)
+      }
+    }
+  }
+
   if (extensionsResult.errors.length > 0) {
     for (const err of extensionsResult.errors) {
       // Downgrade conflicts with built-in tools to warnings (#1347)
@@ -619,6 +632,19 @@ markStartup('createAgentSession')
 // Before this, extension-provided models (e.g. claude-code/*) were not yet in the
 // registry, causing the user's valid choice to be silently overwritten.
 validateConfiguredModel(modelRegistry, settingsManager)
+
+// Re-apply the validated model to the session. findInitialModel() may have picked
+// a fallback if extension models weren't yet registered at that point (#3534).
+{
+  const validatedProvider = settingsManager.getDefaultProvider()
+  const validatedModelId = settingsManager.getDefaultModel()
+  if (validatedProvider && validatedModelId) {
+    const correctModel = modelRegistry.find(validatedProvider, validatedModelId)
+    if (correctModel) {
+      session.setModel(correctModel)
+    }
+  }
+}
 
 if (extensionsResult.errors.length > 0) {
   for (const err of extensionsResult.errors) {

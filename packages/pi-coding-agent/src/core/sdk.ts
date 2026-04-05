@@ -214,6 +214,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	// Flush extension provider registrations so extension-provided models (e.g. claude-code/*)
+	// are available in the registry before model resolution. Without this, findInitialModel()
+	// cannot find extension models and falls back to built-in providers (#3534).
+	const extensionsForModelResolution = resourceLoader.getExtensions();
+	for (const { name, config } of extensionsForModelResolution.runtime.pendingProviderRegistrations) {
+		modelRegistry.registerProvider(name, config);
+	}
+	// Note: we do NOT clear pendingProviderRegistrations here — bindCore() will iterate
+	// an empty array harmlessly, and clearing here would require the runtime to track
+	// whether the flush already happened.
+
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
 	if (!model) {
 		const result = await findInitialModel({
