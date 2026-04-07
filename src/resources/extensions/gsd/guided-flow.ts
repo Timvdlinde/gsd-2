@@ -295,8 +295,10 @@ async function dispatchWorkflow(
   // "Grammar is too complex" when the combined tool schema is too large.
   // Discuss flows only need a small subset of GSD tools — strip the heavy
   // planning/execution/completion tools to keep the grammar within limits.
+  let savedTools: string[] | null = null;
   if (unitType?.startsWith("discuss-")) {
     const currentTools = pi.getActiveTools();
+    savedTools = currentTools;
     // Keep all non-GSD tools (builtins, other extensions) and only the
     // GSD tools on the discuss allowlist.
     const scopedTools = currentTools.filter(
@@ -322,6 +324,13 @@ async function dispatchWorkflow(
     },
     { triggerTurn: true },
   );
+
+  // Restore full tool set after the message is queued. The LLM turn has
+  // already captured the scoped set — restoring prevents the narrowed
+  // tools from leaking into subsequent dispatches (#3628).
+  if (savedTools) {
+    pi.setActiveTools(savedTools);
+  }
 }
 
 /**
