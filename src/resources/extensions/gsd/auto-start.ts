@@ -540,7 +540,7 @@ export async function bootstrapAutoSession(
         if (currentBranch.startsWith("milestone/")) {
           const integrationBranch = nativeDetectMainBranch(base);
           nativeCheckoutBranch(base, integrationBranch);
-          logWarning("autoStart", `Returned to "${integrationBranch}" — HEAD was on stale milestone branch "${currentBranch}" (isolation: none does not use milestone branches).`);
+          logWarning("bootstrap", `Returned to "${integrationBranch}" — HEAD was on stale milestone branch "${currentBranch}" (isolation: none does not use milestone branches).`);
         }
       } catch {
         // Non-fatal — log and continue; user may need to manually checkout
