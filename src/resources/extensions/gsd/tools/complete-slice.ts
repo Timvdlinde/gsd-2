@@ -233,6 +233,15 @@ export async function handleCompleteSlice(
     return { error: ownershipErr };
   }
 
+  // ── Verification content gate (#3580) ──────────────────────────────────
+  // Reject completion when the provided verification/UAT clearly indicates
+  // the slice is blocked or failed. Prevents prompt regressions from
+  // silently advancing blocked slices.
+  const BLOCKED_SIGNALS = /\b(status:\s*blocked|verification_result:\s*failed|slice is blocked|cannot complete|verification failed)\b/i;
+  if (BLOCKED_SIGNALS.test(params.verification || "") || BLOCKED_SIGNALS.test(params.uatContent || "")) {
+    return { error: `slice verification indicates blocked/failed state — do not complete a slice that has not passed verification. Address the blockers and re-verify first.` };
+  }
+
   // ── Guards + DB writes inside a single transaction (prevents TOCTOU) ───
   const completedAt = new Date().toISOString();
   let guardError: string | null = null;
