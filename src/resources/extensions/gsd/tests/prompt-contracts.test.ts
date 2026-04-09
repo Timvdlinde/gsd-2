@@ -35,6 +35,13 @@ test("workflow-start prompt defaults to autonomy instead of per-phase confirmati
   assert.doesNotMatch(prompt, /Gate between phases/i);
 });
 
+test("system prompt references CODEBASE.md and /gsd codebase", () => {
+  const prompt = readPrompt("system");
+  assert.match(prompt, /CODEBASE\.md/);
+  assert.match(prompt, /\/gsd codebase \[generate\|update\|stats\]/);
+  assert.match(prompt, /auto-refreshes it when tracked files change/i);
+});
+
 test("discuss prompt allows implementation questions when they materially matter", () => {
   const prompt = readPrompt("discuss");
   assert.match(prompt, /Lead with experience, but ask implementation when it materially matters/i);

@@ -72,7 +72,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "mcp", desc: "MCP server status and connectivity check (status, check <server>)" },
   { cmd: "rethink", desc: "Conversational project reorganization — reorder, park, discard, add milestones" },
   { cmd: "workflow", desc: "Custom workflow lifecycle (new, run, list, validate, pause, resume)" },
-  { cmd: "codebase", desc: "Generate and manage codebase map (.gsd/CODEBASE.md)" },
+  { cmd: "codebase", desc: "Generate, refresh, and inspect the codebase map cache (.gsd/CODEBASE.md)" },
 ];
 
 const NESTED_COMPLETIONS: CompletionMap = {
@@ -236,7 +236,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "generate", desc: "Generate or regenerate CODEBASE.md" },
     { cmd: "generate --max-files", desc: "Generate with custom file limit (default: 500)" },
     { cmd: "generate --collapse-threshold", desc: "Generate with custom collapse threshold (default: 20)" },
-    { cmd: "update", desc: "Incremental update (preserves descriptions)" },
+    { cmd: "update", desc: "Refresh the CODEBASE.md cache immediately (preserves descriptions)" },
     { cmd: "update --max-files", desc: "Update with custom file limit" },
     { cmd: "update --collapse-threshold", desc: "Update with custom collapse threshold" },
     { cmd: "stats", desc: "Show file count, description coverage, and generation time" },

@@ -11,6 +11,7 @@ import { readForensicsMarker } from "../forensics.js";
 import { resolveAllSkillReferences, renderPreferencesForSystemPrompt, loadEffectiveGSDPreferences } from "../preferences.js";
 import { resolveSkillReference } from "../preferences-skills.js";
 import { resolveGsdRootFile, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
+import { ensureCodebaseMapFresh, readCodebaseMap } from "../codebase-generator.js";
 import { hasSkillSnapshot, detectNewSkills, formatSkillsXml } from "../skill-discovery.js";
 import { getActiveAutoWorktreeContext } from "../auto-worktree.js";
 import { getActiveWorktreeName, getWorktreeOriginalCwd } from "../worktree-command.js";
@@ -128,10 +129,24 @@ export async function buildBeforeAgentStartResult(
   }
 
   let codebaseBlock = "";
+  try {
+    const codebaseOptions = loadedPreferences?.preferences?.codebase
+      ? {
+          excludePatterns: loadedPreferences.preferences.codebase.exclude_patterns,
+          maxFiles: loadedPreferences.preferences.codebase.max_files,
+          collapseThreshold: loadedPreferences.preferences.codebase.collapse_threshold,
+        }
+      : undefined;
+    ensureCodebaseMapFresh(process.cwd(), codebaseOptions);
+  } catch (e) {
+    logWarning("bootstrap", `CODEBASE refresh failed: ${(e as Error).message}`);
+  }
+
   const codebasePath = resolveGsdRootFile(process.cwd(), "CODEBASE");
-  if (existsSync(codebasePath)) {
+  const rawCodebase = readCodebaseMap(process.cwd());
+  if (existsSync(codebasePath) && rawCodebase) {
     try {
-      const rawContent = readFileSync(codebasePath, "utf-8").trim();
+      const rawContent = rawCodebase.trim();
       if (rawContent) {
         // Cap injection size to ~2 000 tokens to avoid bloating every request.
         // Full map is always available at .gsd/CODEBASE.md.
@@ -141,7 +156,7 @@ export async function buildBeforeAgentStartResult(
         const content = rawContent.length > MAX_CODEBASE_CHARS
           ? rawContent.slice(0, MAX_CODEBASE_CHARS) + "\n\n*(truncated — see .gsd/CODEBASE.md for full map)*"
           : rawContent;
-        codebaseBlock = `\n\n[PROJECT CODEBASE — File structure and descriptions (generated ${generatedAt}, may be stale — run /gsd codebase update to refresh)]\n\n${content}`;
+        codebaseBlock = `\n\n[PROJECT CODEBASE — File structure and descriptions (generated ${generatedAt}, auto-refreshed when GSD detects tracked file changes; use /gsd codebase stats for status)]\n\n${content}`;
       }
     } catch (e) {
       logWarning("bootstrap", `CODEBASE file read failed: ${(e as Error).message}`);
@@ -494,4 +509,3 @@ export function clearForensicsMarker(basePath: string): void {
     }
   }
 }
-

@@ -44,6 +44,7 @@ export function showHelp(ctx: ExtensionCommandContext): void {
     "",
     "PROJECT KNOWLEDGE",
     "  /gsd knowledge <type> <text>   Add rule, pattern, or lesson to KNOWLEDGE.md",
+    "  /gsd codebase [generate|update|stats]   Manage the CODEBASE.md cache used in prompt context",
     "",
     "SETUP & CONFIGURATION",
     "  /gsd init           Project init wizard — detect, configure, bootstrap .gsd/",
