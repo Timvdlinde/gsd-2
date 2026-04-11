@@ -1801,7 +1801,6 @@ function InlineInput({
   return (
     <div className="flex gap-2">
       <Input
-        type={request.secure ? "password" : "text"}
         ref={inputRef}
         value={value}
         onChange={(e) => setValue(e.target.value)}

@@ -380,7 +380,7 @@ export interface WorkspaceLiveState {
 export type ExtensionUiRequestEvent =
   | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number; allowMultiple?: boolean }
   | { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
-  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number; secure?: boolean }
+  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number }
   | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string }
   | { type: "extension_ui_request"; id: string; method: "notify"; message: string; notifyType?: "info" | "warning" | "error" }
   | { type: "extension_ui_request"; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }

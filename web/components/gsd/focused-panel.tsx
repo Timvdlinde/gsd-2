@@ -180,7 +180,6 @@ function InputRenderer({
       }}
     >
       <Input
-        type={request.secure ? "password" : "text"}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={request.placeholder || "Enter a value"}
