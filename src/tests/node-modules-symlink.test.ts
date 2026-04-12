@@ -147,9 +147,9 @@ test("pnpm layout: merged node_modules contains entries from both hoisted and in
     symlinkSync(join(hoisted, entry.name), join(agentNodeModules, entry.name));
   }
 
-  // Overlay @gsd* workspace scopes from internal (these take precedence)
+  // Overlay all non-dotfile entries from internal (these take precedence)
   for (const entry of readdirSync(internal, { withFileTypes: true })) {
-    if (!entry.name.startsWith("@gsd")) continue;
+    if (entry.name.startsWith(".")) continue;
     const link = join(agentNodeModules, entry.name);
     try { lstatSync(link); unlinkSync(link); } catch { /* didn't exist */ }
     symlinkSync(join(internal, entry.name), link);
@@ -171,6 +171,53 @@ test("pnpm layout: merged node_modules contains entries from both hoisted and in
   // Verify: @gsd points to internal, not hoisted (internal takes precedence)
   const gsdTarget = readlinkSync(join(agentNodeModules, "@gsd"));
   assert.equal(gsdTarget, join(internal, "@gsd"), "@gsd should point to internal node_modules");
+});
+
+test("pnpm layout: non-@gsd internal deps (e.g. @anthropic-ai) are included in merged dir", (t) => {
+  // Regression: PR #3564 narrowed the internal overlay to @gsd* only,
+  // dropping optionalDependencies like @anthropic-ai/claude-agent-sdk
+  // that npm installs internally rather than hoisting.
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-pnpm-internal-optional-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const hoisted = join(tmp, "node_modules");
+  const pkgRoot = join(hoisted, "gsd-pi");
+  const internal = join(pkgRoot, "node_modules");
+  const agentNodeModules = join(tmp, "agent", "node_modules");
+
+  // Hoisted: only external deps (no @anthropic-ai — it's internal-only)
+  mkdirSync(join(hoisted, "yaml"), { recursive: true });
+  mkdirSync(pkgRoot, { recursive: true });
+
+  // Internal: workspace packages + optional dep that wasn't hoisted
+  mkdirSync(join(internal, "@gsd", "pi-ai"), { recursive: true });
+  mkdirSync(join(internal, "@anthropic-ai", "claude-agent-sdk"), { recursive: true });
+
+  mkdirSync(agentNodeModules, { recursive: true });
+
+  // Link hoisted entries
+  for (const entry of readdirSync(hoisted, { withFileTypes: true })) {
+    if (entry.name === "gsd-pi" || entry.name.startsWith(".")) continue;
+    symlinkSync(join(hoisted, entry.name), join(agentNodeModules, entry.name));
+  }
+
+  // Overlay all non-dotfile internal entries (the fixed logic)
+  for (const entry of readdirSync(internal, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const link = join(agentNodeModules, entry.name);
+    try { lstatSync(link); unlinkSync(link); } catch { /* didn't exist */ }
+    symlinkSync(join(internal, entry.name), link);
+  }
+
+  // @anthropic-ai must be present — this is what broke in #3564
+  assert.ok(existsSync(join(agentNodeModules, "@anthropic-ai")), "@anthropic-ai should resolve from internal");
+  assert.ok(existsSync(join(agentNodeModules, "@anthropic-ai", "claude-agent-sdk")), "@anthropic-ai/claude-agent-sdk should resolve");
+
+  // @gsd still resolves
+  assert.ok(existsSync(join(agentNodeModules, "@gsd")), "@gsd should resolve");
+
+  // Hoisted deps still resolve
+  assert.ok(existsSync(join(agentNodeModules, "yaml")), "yaml should resolve");
 });
 
 test("hasMissingWorkspaceScopes detects pnpm layout", (t) => {

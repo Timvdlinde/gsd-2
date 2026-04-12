@@ -399,12 +399,15 @@ function reconcileMergedNodeModules(
     console.error(`[gsd] WARN: Failed to read hoisted node_modules at ${hoisted}: ${err instanceof Error ? err.message : err}`)
   }
 
-  // Overlay @gsd* workspace scopes from internal node_modules
+  // Overlay internal node_modules entries that weren't hoisted.
+  // This covers @gsd/* workspace packages AND optional deps like
+  // @anthropic-ai/claude-agent-sdk that npm keeps internal.
   try {
     for (const entry of readdirSync(internal, { withFileTypes: true })) {
-      if (!entry.name.startsWith('@gsd')) continue
+      if (entry.name.startsWith('.')) continue
       const link = join(agentNodeModules, entry.name)
-      try { lstatSync(link); unlinkSync(link) } catch { /* didn't exist */ }
+      // Replace hoisted symlink with internal version (internal takes precedence)
+      try { lstatSync(link); unlinkSync(link) } catch { /* didn't exist — will create below */ }
       try { symlinkSync(join(internal, entry.name), link); linkedCount++ } catch { /* skip individual */ }
     }
   } catch (err) {
