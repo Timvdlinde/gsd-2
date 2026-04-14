@@ -104,6 +104,7 @@ import {
   updateSliceProgressCache,
   unitVerb,
   hideFooter,
+  describeNextUnit,
 } from "./auto-dashboard.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -1025,8 +1026,32 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
     }
   }
 
-  // Step mode → show wizard instead of dispatch
+  // Step mode → show wizard instead of dispatch.
+  // Without this notify(), /gsd in step mode finishes a unit and silently
+  // exits the loop, leaving the user with no hint to /clear and /gsd again.
   if (s.stepMode) {
+    try {
+      const nextState = await deriveState(s.basePath);
+      if (nextState.phase === "complete") {
+        ctx.ui.notify(
+          "Step complete — milestone finished. Run /gsd status to review, or start the next milestone.",
+          "info",
+        );
+      } else {
+        const next = describeNextUnit(nextState);
+        ctx.ui.notify(
+          `Step complete. Next: ${next.label}\n`
+          + `Run /clear, then /gsd to continue (or /gsd auto to run continuously).`,
+          "info",
+        );
+      }
+    } catch (e) {
+      debugLog("postUnit", { phase: "step-wizard-notify", error: String(e) });
+      ctx.ui.notify(
+        "Step complete. Run /clear, then /gsd to continue (or /gsd auto to run continuously).",
+        "info",
+      );
+    }
     return "step-wizard";
   }
 
