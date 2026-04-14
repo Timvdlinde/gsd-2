@@ -12,10 +12,15 @@
 
 import type { ExtensionContext, ExtensionAPI } from "@gsd/pi-coding-agent";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { resolveSliceFile, resolveSlicePath } from "./paths.js";
+import { resolveSliceFile, resolveSlicePath, resolveMilestoneFile } from "./paths.js";
 import { parseUnitId } from "./unit-id.js";
-import { isDbAvailable, getTask, getSliceTasks, type TaskRow } from "./gsd-db.js";
+import { isDbAvailable, getTask, getSliceTasks, getMilestoneSlices, type TaskRow } from "./gsd-db.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { extractVerdict } from "./verdict-parser.js";
+import { isClosedStatus } from "./status-guards.js";
+import { loadFile } from "./files.js";
+import { parseRoadmap } from "./parsers-legacy.js";
+import { isMilestoneComplete } from "./state.js";
 import {
   runVerificationGate,
   formatFailureContext,
@@ -44,6 +49,88 @@ function isInfraVerificationFailure(stderr: string): boolean {
 }
 
 /**
+ * Post-unit guard for `validate-milestone` units (#4094).
+ *
+ * When validate-milestone writes verdict=needs-remediation, the agent is
+ * expected to also call gsd_reassess_roadmap in the same turn to add
+ * remediation slices. If they don't, the state machine re-derives
+ * `phase: validating-milestone` indefinitely (all slices still complete +
+ * verdict still needs-remediation), wasting ~3 dispatches before the stuck
+ * detector fires.
+ *
+ * This guard fires immediately on the first occurrence: if VALIDATION.md
+ * verdict is needs-remediation and no incomplete slices exist for the
+ * milestone, pause the auto-loop with a clear blocker.
+ */
+async function runValidateMilestonePostCheck(
+  vctx: VerificationContext,
+  pauseAuto: (ctx?: ExtensionContext, pi?: ExtensionAPI) => Promise<void>,
+): Promise<VerificationResult> {
+  const { s, ctx, pi } = vctx;
+  if (!s.currentUnit) return "continue";
+
+  const { milestone: mid } = parseUnitId(s.currentUnit.id);
+  if (!mid) return "continue";
+
+  const validationFile = resolveMilestoneFile(s.basePath, mid, "VALIDATION");
+  if (!validationFile) return "continue";
+
+  const validationContent = await loadFile(validationFile);
+  if (!validationContent) return "continue";
+
+  const verdict = extractVerdict(validationContent);
+  if (verdict !== "needs-remediation") return "continue";
+
+  const incompleteSliceCount = await countIncompleteSlices(s.basePath, mid);
+
+  // If any non-closed slices exist, the agent successfully queued remediation
+  // work — proceed normally. The state machine will execute those slices and
+  // re-validate per the #3596/#3670 fix.
+  if (incompleteSliceCount > 0) return "continue";
+
+  ctx.ui.notify(
+    `Milestone ${mid} validation returned verdict=needs-remediation but no remediation slices were added. Pausing for human review.`,
+    "error",
+  );
+  process.stderr.write(
+    `validate-milestone: pausing — verdict=needs-remediation with no incomplete slices for ${mid}. ` +
+      `The agent must call gsd_reassess_roadmap to add remediation slices before re-validation.\n`,
+  );
+  await pauseAuto(ctx, pi);
+  return "pause";
+}
+
+/**
+ * Count slices for a milestone that are not in a closed status.
+ * DB-backed projects are authoritative (#4094 peer review); falls back to
+ * roadmap parsing only when the DB is unavailable.
+ */
+async function countIncompleteSlices(basePath: string, milestoneId: string): Promise<number> {
+  if (isDbAvailable()) {
+    const slices = getMilestoneSlices(milestoneId);
+    if (slices.length === 0) {
+      // No DB rows — treat as "unknown", do not pause.
+      return 1;
+    }
+    return slices.filter((slice) => !isClosedStatus(slice.status)).length;
+  }
+
+  // Filesystem fallback: parse the roadmap markdown.
+  try {
+    const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+    if (!roadmapFile) return 1;
+    const roadmapContent = await loadFile(roadmapFile);
+    if (!roadmapContent) return 1;
+    const roadmap = parseRoadmap(roadmapContent);
+    if (roadmap.slices.length === 0) return 1;
+    return isMilestoneComplete(roadmap) ? 0 : 1;
+  } catch {
+    // Parsing failures should not cause false-positive pauses.
+    return 1;
+  }
+}
+
+/**
  * Run the verification gate for the current execute-task unit.
  * Returns:
  * - "continue" — gate passed (or no checks configured), proceed normally
@@ -56,7 +143,15 @@ export async function runPostUnitVerification(
 ): Promise<VerificationResult> {
   const { s, ctx, pi } = vctx;
 
-  if (!s.currentUnit || s.currentUnit.type !== "execute-task") {
+  if (!s.currentUnit) {
+    return "continue";
+  }
+
+  if (s.currentUnit.type === "validate-milestone") {
+    return await runValidateMilestonePostCheck(vctx, pauseAuto);
+  }
+
+  if (s.currentUnit.type !== "execute-task") {
     return "continue";
   }
 
