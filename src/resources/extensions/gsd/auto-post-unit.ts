@@ -632,6 +632,30 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           s.verificationRetryCount.set(retryKey, attempt);
 
           if (attempt > MAX_VERIFICATION_RETRIES) {
+            // #4175: For complete-milestone, a blocker placeholder is harmful —
+            // the stub SUMMARY has no recovery value (milestone is terminal),
+            // it does not update DB status (so deriveState never advances),
+            // and it fools stopAuto's presence check into merging a milestone
+            // that was never legitimately completed. Pause auto-mode with a
+            // clear single failure signal and preserve the worktree branch.
+            if (s.currentUnit.type === "complete-milestone") {
+              debugLog("postUnit", {
+                phase: "artifact-verify-pause-complete-milestone",
+                unitType: s.currentUnit.type,
+                unitId: s.currentUnit.id,
+                attempt,
+                maxRetries: MAX_VERIFICATION_RETRIES,
+              });
+              s.verificationRetryCount.delete(retryKey);
+              s.pendingVerificationRetry = null;
+              ctx.ui.notify(
+                `Milestone ${s.currentUnit.id} verification failed after ${MAX_VERIFICATION_RETRIES} retries — worktree branch preserved. Re-run /gsd auto once blockers are resolved.`,
+                "error",
+              );
+              await pauseAuto(ctx, pi);
+              return "dispatched";
+            }
+
             // Retries exhausted — write a blocker placeholder so the pipeline
             // can advance past this stuck unit (#2653).
             debugLog("postUnit", {

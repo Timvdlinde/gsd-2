@@ -386,6 +386,10 @@ function buildCompletenessSet(basePath: string, milestones: MilestoneRow[]) {
   const completeMilestoneIds = new Set<string>();
   const parkedMilestoneIds = new Set<string>();
 
+  // DB-authoritative: a milestone is only "complete" when its DB row says so.
+  // SUMMARY-file presence is NOT a completion signal here — an orphan SUMMARY
+  // (crashed complete-milestone turn, partial merge, manual edit) must not
+  // flip derived state to complete and cascade into a false auto-merge (#4179).
   for (const m of milestones) {
     const parkedFile = resolveMilestoneFile(basePath, m.id, "PARKED");
     if (parkedFile || m.status === 'parked') {
@@ -393,11 +397,6 @@ function buildCompletenessSet(basePath: string, milestones: MilestoneRow[]) {
       continue;
     }
     if (isStatusDone(m.status)) {
-      completeMilestoneIds.add(m.id);
-      continue;
-    }
-    const summaryFile = resolveMilestoneFile(basePath, m.id, "SUMMARY");
-    if (summaryFile) {
       completeMilestoneIds.add(m.id);
       continue;
     }
@@ -429,18 +428,22 @@ async function buildRegistryAndFindActive(
       if (isGhostMilestone(basePath, m.id)) continue;
     }
 
-    const summaryFile = resolveMilestoneFile(basePath, m.id, "SUMMARY");
-
-    if (completeMilestoneIds.has(m.id) || (summaryFile !== null)) {
+    // DB-authoritative completeness (#4179): only trust completeMilestoneIds,
+    // which is itself derived from DB status. SUMMARY-file presence alone must
+    // not imply completion. The summary file may still be consulted below as a
+    // title source for legitimately-complete milestones whose DB row has no title.
+    if (completeMilestoneIds.has(m.id)) {
       let title = stripMilestonePrefix(m.title) || m.id;
-      if (summaryFile && !m.title) {
-        const summaryContent = await loadFile(summaryFile);
-        if (summaryContent) {
-          title = parseSummary(summaryContent).title || m.id;
+      if (!m.title) {
+        const summaryFile = resolveMilestoneFile(basePath, m.id, "SUMMARY");
+        if (summaryFile) {
+          const summaryContent = await loadFile(summaryFile);
+          if (summaryContent) {
+            title = parseSummary(summaryContent).title || m.id;
+          }
         }
       }
       registry.push({ id: m.id, title, status: 'complete' });
-      completeMilestoneIds.add(m.id);
       continue;
     }
 
@@ -481,7 +484,14 @@ async function buildRegistryAndFindActive(
         const validationContent = validationFile ? await loadFile(validationFile) : null;
         const validationTerminal = validationContent ? isValidationTerminal(validationContent) : false;
 
-        if (!validationTerminal || (validationTerminal && !summaryFile)) {
+        // DB-authoritative (#4179): completeness is already decided by
+        // completeMilestoneIds above. If we reached this branch, the DB says
+        // the milestone is NOT complete — so any SUMMARY file on disk is an
+        // orphan (crashed complete-milestone, partial merge, manual edit) and
+        // must not short-circuit this path. When validation is terminal, fall
+        // through to the default active-push below so `complete-milestone` can
+        // re-run idempotently.
+        if (!validationTerminal) {
           activeMilestone = { id: m.id, title };
           activeMilestoneSlices = slices;
           activeMilestoneFound = true;

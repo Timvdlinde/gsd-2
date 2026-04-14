@@ -187,7 +187,7 @@ import {
   deregisterSigtermHandler as _deregisterSigtermHandler,
   detectWorkingTreeActivity,
 } from "./auto-supervisor.js";
-import { isDbAvailable } from "./gsd-db.js";
+import { isDbAvailable, getMilestone } from "./gsd-db.js";
 import { countPendingCaptures } from "./captures.js";
 import { clearCmuxSidebar, logCmuxEvent, syncCmuxSidebar } from "../cmux/index.js";
 
@@ -761,24 +761,36 @@ export async function stopAuto(
           : { notify: () => {} };
         const resolver = buildResolver();
 
-        // Check if the milestone is complete — SUMMARY file is the authoritative signal.
+        // Check if the milestone is complete. DB status is the authoritative
+        // signal — only a successful gsd_complete_milestone call flips it to
+        // "complete" (tools/complete-milestone.ts). SUMMARY file presence is
+        // NOT sufficient: a blocker placeholder stub or a partial write can
+        // leave a file behind without the milestone actually being done,
+        // which previously caused stopAuto to merge a failed milestone and
+        // emit a misleading metadata-only merge warning (#4175).
+        // DB-unavailable projects fall back to SUMMARY-file presence.
         let milestoneComplete = false;
         try {
-          const summaryPath = resolveMilestoneFile(
-            s.originalBasePath || s.basePath,
-            s.currentMilestoneId,
-            "SUMMARY",
-          );
-          if (!summaryPath) {
-            // Also check in the worktree path (SUMMARY may not be synced yet)
-            const wtSummaryPath = resolveMilestoneFile(
-              s.basePath,
+          if (isDbAvailable()) {
+            const dbRow = getMilestone(s.currentMilestoneId);
+            milestoneComplete = dbRow?.status === "complete";
+          } else {
+            const summaryPath = resolveMilestoneFile(
+              s.originalBasePath || s.basePath,
               s.currentMilestoneId,
               "SUMMARY",
             );
-            milestoneComplete = wtSummaryPath !== null;
-          } else {
-            milestoneComplete = true;
+            if (!summaryPath) {
+              // Also check in the worktree path (SUMMARY may not be synced yet)
+              const wtSummaryPath = resolveMilestoneFile(
+                s.basePath,
+                s.currentMilestoneId,
+                "SUMMARY",
+              );
+              milestoneComplete = wtSummaryPath !== null;
+            } else {
+              milestoneComplete = true;
+            }
           }
         } catch (err) {
           // Non-fatal — fall through to preserveBranch path
