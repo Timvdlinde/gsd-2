@@ -25,6 +25,31 @@ import { getAutoWorktreePath } from "./auto-worktree.js";
 import { projectRoot } from "./commands/context.js";
 import { loadPrompt } from "./prompt-loader.js";
 
+const UPDATE_REGISTRY_URL = "https://registry.npmjs.org/gsd-pi/latest";
+const UPDATE_FETCH_TIMEOUT_MS = 5000;
+
+function resolveInstallCommand(pkg: string): string {
+  if ('bun' in process.versions) return `bun add -g ${pkg}`;
+  return `npm install -g ${pkg}`;
+}
+
+async function fetchLatestVersionForCommand(): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPDATE_FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(UPDATE_REGISTRY_URL, { signal: controller.signal });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { version?: string };
+    const latest = typeof data.version === "string" ? data.version.trim().replace(/^v/, "") : "";
+    return latest.length > 0 ? latest : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function dispatchDoctorHeal(pi: ExtensionAPI, scope: string | undefined, reportText: string, structuredIssues: string): void {
   const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(process.env.HOME ?? "~", ".gsd", "agent", "GSD-WORKFLOW.md");
   const workflow = readFileSync(workflowPath, "utf-8");
@@ -43,21 +68,31 @@ export function dispatchDoctorHeal(pi: ExtensionAPI, scope: string | undefined, 
   );
 }
 
-export async function handleDoctor(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+/** Parse doctor command args into structured flags and positionals (pure, no I/O). */
+export function parseDoctorArgs(args: string) {
   const trimmed = args.trim();
-  // Extract flags before positional parsing
   const jsonMode = trimmed.includes("--json");
   const dryRun = trimmed.includes("--dry-run");
+  const fixFlag = trimmed.includes("--fix");
   const includeBuild = trimmed.includes("--build");
   const includeTests = trimmed.includes("--test");
-  const stripped = trimmed.replace(/--json|--dry-run|--build|--test/g, "").trim();
+  const stripped = trimmed.replace(/--json|--dry-run|--build|--test|--fix/g, "").trim();
   const parts = stripped ? stripped.split(/\s+/) : [];
   const mode = parts[0] === "fix" || parts[0] === "heal" || parts[0] === "audit" ? parts[0] : "doctor";
   const requestedScope = mode === "doctor" ? parts[0] : parts[1];
+  return { jsonMode, dryRun, fixFlag, includeBuild, includeTests, mode, requestedScope };
+}
+
+export function isDoctorHealActionable(issue: { fixable: boolean; severity: string }): boolean {
+  return issue.fixable && issue.severity !== "info";
+}
+
+export async function handleDoctor(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  const { jsonMode, dryRun, fixFlag, includeBuild, includeTests, mode, requestedScope } = parseDoctorArgs(args);
   const scope = await selectDoctorScope(projectRoot(), requestedScope);
   const effectiveScope = mode === "audit" ? requestedScope : scope;
   const report = await runGSDDoctor(projectRoot(), {
-    fix: mode === "fix" || mode === "heal" || dryRun,
+    fix: mode === "fix" || mode === "heal" || dryRun || fixFlag,
     dryRun,
     scope: effectiveScope,
     includeBuild,
@@ -83,7 +118,7 @@ export async function handleDoctor(args: string, ctx: ExtensionCommandContext, p
       scope: effectiveScope,
       includeWarnings: true,
     });
-    const actionable = unresolved.filter(issue => issue.severity === "error");
+    const actionable = unresolved.filter(isDoctorHealActionable);
     if (actionable.length === 0) {
       ctx.ui.notify("Doctor heal found nothing actionable to hand off to the LLM.", "info");
       return;
@@ -388,13 +423,8 @@ export async function handleUpdate(ctx: ExtensionCommandContext): Promise<void> 
 
   ctx.ui.notify(`Current version: v${current}\nChecking npm registry...`, "info");
 
-  let latest: string;
-  try {
-    latest = execSync(`npm view ${NPM_PACKAGE} version`, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
+  const latest = await fetchLatestVersionForCommand();
+  if (!latest) {
     ctx.ui.notify("Failed to reach npm registry. Check your network connection.", "error");
     return;
   }
@@ -406,8 +436,9 @@ export async function handleUpdate(ctx: ExtensionCommandContext): Promise<void> 
 
   ctx.ui.notify(`Updating: v${current} → v${latest}...`, "info");
 
+  const installCmd = resolveInstallCommand(`${NPM_PACKAGE}@latest`);
   try {
-    execSync(`npm install -g ${NPM_PACKAGE}@latest`, {
+    execSync(installCmd, {
       stdio: ["ignore", "pipe", "ignore"],
     });
     ctx.ui.notify(
@@ -416,7 +447,7 @@ export async function handleUpdate(ctx: ExtensionCommandContext): Promise<void> 
     );
   } catch {
     ctx.ui.notify(
-      `Update failed. Try manually: npm install -g ${NPM_PACKAGE}@latest`,
+      `Update failed. Try manually: ${installCmd}`,
       "error",
     );
   }

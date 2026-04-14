@@ -81,6 +81,12 @@ export interface InterviewRoundOptions {
 	 */
 	exitHeadline?: string;
 	/**
+	 * Optional AbortSignal to cancel the interview externally (e.g. when racing
+	 * against a remote question channel). When aborted, the TUI closes and the
+	 * promise resolves with an empty answers object.
+	 */
+	signal?: AbortSignal;
+	/**
 	 * Text for the "exit" hint shown in the review screen footer and exit confirm overlay.
 	 * Defaults to "end interview".
 	 */
@@ -207,6 +213,13 @@ export async function showInterviewRound(
 		let exitCursor = 0; // 0 = keep going (default), 1 = end interview
 		let cachedLines: string[] | undefined;
 
+		// External cancellation (e.g. remote channel won the race)
+		if (opts.signal) {
+			const onAbort = () => done({ endInterview: false, answers: {} });
+			if (opts.signal.aborted) { onAbort(); }
+			else { opts.signal.addEventListener("abort", onAbort, { once: true }); }
+		}
+
 		// Editor is created once; editorTheme comes from the design system
 		const editorRef = { current: null as Editor | null };
 
@@ -300,7 +313,7 @@ export async function showInterviewRound(
 			// instead of being trapped in a re-asking loop (bug #2715).
 			// Only auto-open if the user hasn't already provided notes —
 			// otherwise Enter from notes mode loops back here endlessly.
-			if (!isMultiSelect(currentIdx) && states[currentIdx].cursorIndex === noneOrDoneIdx(currentIdx) && !states[currentIdx].notes) {
+			if (!isMultiSelect(currentIdx) && states[currentIdx].cursorIndex === noneOrDoneIdx(currentIdx) && !states[currentIdx].notes && !states[currentIdx].notesVisible) {
 				states[currentIdx].notesVisible = true;
 				focusNotes = true;
 				loadStateToEditor();

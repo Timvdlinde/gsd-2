@@ -5,14 +5,17 @@
  */
 
 import type { Api, Model } from "@gsd/pi-ai";
+import { getProviderCapabilities } from "@gsd/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import type { GSDPreferences } from "./preferences.js";
 import { resolveModelWithFallbacksForUnit, resolveDynamicRoutingConfig } from "./preferences.js";
 import type { ComplexityTier } from "./complexity-classifier.js";
 import { classifyUnitComplexity, tierLabel } from "./complexity-classifier.js";
-import { resolveModelForComplexity, escalateTier, getEligibleModels, loadCapabilityOverrides } from "./model-router.js";
+import { resolveModelForComplexity, escalateTier, getEligibleModels, loadCapabilityOverrides, adjustToolSet, filterToolsForProvider } from "./model-router.js";
 import { getLedger, getProjectTotals } from "./metrics.js";
 import { unitPhaseLabel } from "./auto-dashboard.js";
+import { getSessionModelOverride } from "./session-model-override.js";
+import { logWarning } from "./workflow-logger.js";
 
 export interface ModelSelectionResult {
   /** Routing metadata for metrics recording */
@@ -23,13 +26,21 @@ export interface ModelSelectionResult {
 
 export function resolvePreferredModelConfig(
   unitType: string,
-  autoModeStartModel: { provider: string; id: string } | null,
+  autoModeStartModel: { provider: string; id: string; flatRateCtx?: FlatRateContext } | null,
+  isAutoMode = true,
 ) {
   const explicitConfig = resolveModelWithFallbacksForUnit(unitType);
   if (explicitConfig) return explicitConfig;
 
+  // In interactive mode, don't synthesize a routing-based model config.
+  // The user's session model (/model) should be used as-is (#3962).
+  if (!isAutoMode) return undefined;
+
   const routingConfig = resolveDynamicRoutingConfig();
   if (!routingConfig.enabled || !routingConfig.tier_models) return undefined;
+
+  // Don't synthesize a routing config for flat-rate providers (#3453).
+  if (autoModeStartModel && isFlatRateProvider(autoModeStartModel.provider, autoModeStartModel.flatRateCtx)) return undefined;
 
   const ceilingModel = routingConfig.tier_models.heavy
     ?? (autoModeStartModel ? `${autoModeStartModel.provider}/${autoModeStartModel.id}` : undefined);
@@ -56,10 +67,31 @@ export async function selectAndApplyModel(
   basePath: string,
   prefs: GSDPreferences | undefined,
   verbose: boolean,
-  autoModeStartModel: { provider: string; id: string } | null,
+  autoModeStartModel: { provider: string; id: string; flatRateCtx?: FlatRateContext } | null,
   retryContext?: { isRetry: boolean; previousTier?: string },
+  /** When false (interactive/guided-flow), skip dynamic routing and use the session model.
+   *  Dynamic routing only applies in auto-mode where cost optimization is expected. (#3962) */
+  isAutoMode = true,
+  /** Explicit /gsd model pin captured at bootstrap for long-running auto loops. */
+  sessionModelOverride?: { provider: string; id: string } | null,
 ): Promise<ModelSelectionResult> {
-  const modelConfig = resolvePreferredModelConfig(unitType, autoModeStartModel);
+  const effectiveSessionModelOverride = sessionModelOverride === undefined
+    ? getSessionModelOverride(ctx.sessionManager.getSessionId())
+    : (sessionModelOverride ?? undefined);
+  // Enrich the start model with a flat-rate context up front so routing
+  // synthesis and the dispatch-time guard see the same signals (built-in
+  // list + user `flat_rate_providers` preference + externalCli auto-
+  // detection).  The dispatch-time primary-model check below builds its
+  // own per-provider context when it has a resolved primary model.
+  if (autoModeStartModel) {
+    autoModeStartModel = {
+      ...autoModeStartModel,
+      flatRateCtx: buildFlatRateContext(autoModeStartModel.provider, ctx, prefs),
+    };
+  }
+  const modelConfig = effectiveSessionModelOverride
+    ? undefined
+    : resolvePreferredModelConfig(unitType, autoModeStartModel, isAutoMode);
   let routing: { tier: string; modelDowngraded: boolean } | null = null;
   let appliedModel: Model<Api> | null = null;
 
@@ -67,9 +99,40 @@ export async function selectAndApplyModel(
     const availableModels = ctx.modelRegistry.getAvailable();
 
     // ─── Dynamic Model Routing ─────────────────────────────────────────
+    // Dynamic routing (complexity-based downgrading) only applies in auto-mode.
+    // Interactive/guided-flow dispatches use the user's session model directly,
+    // respecting their /model selection without silent downgrades (#3962).
     const routingConfig = resolveDynamicRoutingConfig();
+    if (!isAutoMode) {
+      routingConfig.enabled = false;
+    }
     let effectiveModelConfig = modelConfig;
     let routingTierLabel = "";
+
+    // Disable routing for flat-rate providers like GitHub Copilot (#3453).
+    // All models cost the same per request, so downgrading to a cheaper
+    // model provides no cost benefit — it only degrades quality.
+    // Fail-closed: if primary model can't be resolved, fall back to
+    // provider-level signals rather than allowing unwanted downgrades.
+    if (routingConfig.enabled) {
+      const primaryModel = resolveModelId(modelConfig.primary, availableModels, ctx.model?.provider);
+      if (primaryModel) {
+        const primaryFlatRateCtx = buildFlatRateContext(primaryModel.provider, ctx, prefs);
+        if (isFlatRateProvider(primaryModel.provider, primaryFlatRateCtx)) {
+          routingConfig.enabled = false;
+        }
+      } else if (
+        (autoModeStartModel && isFlatRateProvider(autoModeStartModel.provider, autoModeStartModel.flatRateCtx))
+        || (ctx.model?.provider && isFlatRateProvider(
+          ctx.model.provider,
+          buildFlatRateContext(ctx.model.provider, ctx, prefs),
+        ))
+      ) {
+        // Primary model unresolvable but provider signals indicate flat-rate —
+        // disable routing to prevent quality degradation.
+        routingConfig.enabled = false;
+      }
+    }
 
     if (routingConfig.enabled) {
       let budgetPct: number | undefined;
@@ -98,19 +161,16 @@ export async function selectAndApplyModel(
           const escalated = escalateTier(retryContext.previousTier as ComplexityTier);
           if (escalated) {
             classification = { ...classification, tier: escalated, reason: "escalated after failure" };
-            if (verbose) {
-              ctx.ui.notify(
-                `Tier escalation: ${retryContext.previousTier} → ${escalated} (retry after failure)`,
-                "info",
-              );
-            }
+            // Always notify on tier escalation — model changes should be visible (#3962)
+            ctx.ui.notify(
+              `Tier escalation: ${retryContext.previousTier} → ${escalated} (retry after failure)`,
+              "info",
+            );
           }
         }
 
         // Load user capability overrides from preferences (D-17: deep-merged with built-in profiles)
-        const capabilityOverrides = loadCapabilityOverrides(
-          (prefs as { modelOverrides?: Record<string, { capabilities?: Record<string, number> }> } | undefined) ?? {},
-        );
+        const capabilityOverrides = loadCapabilityOverrides(prefs ?? {});
 
         // Fire before_model_select hook (ADR-004, D-03)
         // Hook can override model selection entirely by returning { modelId }
@@ -172,24 +232,23 @@ export async function selectAndApplyModel(
             primary: routingResult.modelId,
             fallbacks: routingResult.fallbacks,
           };
-          if (verbose) {
-            if (routingResult.selectionMethod === "capability-scored" && routingResult.capabilityScores) {
-              // Verbose scoring breakdown for capability-scored decisions (D-20)
-              const tierLbl = tierLabel(classification.tier);
-              const scores = Object.entries(routingResult.capabilityScores)
-                .sort(([, a], [, b]) => b - a)
-                .map(([id, score]) => `${id}: ${score.toFixed(1)}`)
-                .join(", ");
-              ctx.ui.notify(
-                `Dynamic routing [${tierLbl}]: ${routingResult.modelId} (capability-scored) — ${scores}`,
-                "info",
-              );
-            } else {
-              ctx.ui.notify(
-                `Dynamic routing [${tierLabel(classification.tier)}]: ${routingResult.modelId} (${classification.reason})`,
-                "info",
-              );
-            }
+          // Always notify on model downgrade — users should see when their
+          // model selection is overridden, not just in verbose mode (#3962).
+          if (routingResult.selectionMethod === "capability-scored" && routingResult.capabilityScores) {
+            const tierLbl = tierLabel(classification.tier);
+            const scores = Object.entries(routingResult.capabilityScores)
+              .sort(([, a], [, b]) => b - a)
+              .map(([id, score]) => `${id}: ${score.toFixed(1)}`)
+              .join(", ");
+            ctx.ui.notify(
+              `Dynamic routing [${tierLbl}]: ${routingResult.modelId} (capability-scored) — ${scores}`,
+              "info",
+            );
+          } else {
+            ctx.ui.notify(
+              `Dynamic routing [${tierLabel(classification.tier)}]: ${routingResult.modelId} (${classification.reason})`,
+              "info",
+            );
           }
         }
         routingTierLabel = ` [${tierLabel(classification.tier)}]`;
@@ -222,11 +281,46 @@ export async function selectAndApplyModel(
       const ok = await pi.setModel(model, { persist: false });
       if (ok) {
         appliedModel = model;
-        const fallbackNote = modelId === effectiveModelConfig.primary
-          ? ""
-          : ` (fallback from ${effectiveModelConfig.primary})`;
-        const phase = unitPhaseLabel(unitType);
-        ctx.ui.notify(`Model [${phase}]${routingTierLabel}: ${model.provider}/${model.id}${fallbackNote}`, "info");
+
+        // ADR-005: Adjust active tool set for the selected model's provider capabilities.
+        // Hard-filter incompatible tools, then let extensions override via adjust_tool_set hook.
+        const activeToolNames = pi.getActiveTools();
+        const { toolNames: compatibleTools, removedTools } = adjustToolSet(activeToolNames, model.api);
+        let finalToolNames = compatibleTools;
+
+        // Fire adjust_tool_set hook — extensions can override the filtered tool set
+        if (routingConfig.hooks !== false) {
+          const hookResult = await pi.emitAdjustToolSet({
+            selectedModelApi: model.api,
+            selectedModelProvider: model.provider,
+            selectedModelId: model.id,
+            activeToolNames,
+            filteredTools: removedTools,
+          });
+          if (hookResult?.toolNames) {
+            finalToolNames = hookResult.toolNames;
+          }
+        }
+
+        // Apply the filtered tool set if any tools were removed
+        if (removedTools.length > 0 || finalToolNames.length !== activeToolNames.length) {
+          pi.setActiveTools(finalToolNames);
+        }
+
+        if (verbose) {
+          const fallbackNote = modelId === effectiveModelConfig.primary
+            ? ""
+            : ` (fallback from ${effectiveModelConfig.primary})`;
+          const phase = unitPhaseLabel(unitType);
+          ctx.ui.notify(`Model [${phase}]${routingTierLabel}: ${model.provider}/${model.id}${fallbackNote}`, "info");
+          // ADR-005: Report tools filtered due to provider incompatibility
+          if (removedTools.length > 0) {
+            ctx.ui.notify(
+              `Tool compatibility: ${removedTools.length} tools filtered for ${model.api} — ${removedTools.join(", ")}`,
+              "info",
+            );
+          }
+        }
         break;
       } else {
         const nextModel = modelsToTry[modelsToTry.indexOf(modelId) + 1];
@@ -303,8 +397,17 @@ export function resolveModelId<T extends { id: string; provider: string }>(
   if (candidates.length === 0) return undefined;
   if (candidates.length === 1) return candidates[0];
 
-  // Extension / CLI-wrapper providers that should never win bare-ID resolution
-  // when a first-class API provider also offers the same model.
+  // When the user's current provider is claude-code (set by startup migration
+  // or explicit selection), honour it for bare IDs.  Routing back to anthropic
+  // would undo the migration and hit the third-party subscription block (#3772).
+  if (currentProvider === "claude-code") {
+    const ccMatch = candidates.find(m => m.provider === "claude-code");
+    if (ccMatch) return ccMatch;
+  }
+
+  // Extension / CLI-wrapper providers that should not win bare-ID resolution
+  // when a first-class API provider also offers the same model AND the user
+  // has not explicitly chosen the extension provider.
   const EXTENSION_PROVIDERS = new Set(["claude-code"]);
 
   // Prefer currentProvider only when it is a first-class API provider
@@ -319,4 +422,76 @@ export function resolveModelId<T extends { id: string; provider: string }>(
 
   // Fall back to first non-extension candidate, or any candidate
   return candidates.find(m => !EXTENSION_PROVIDERS.has(m.provider)) ?? candidates[0];
+}
+
+/**
+ * Flat-rate providers charge the same per request regardless of model.
+ * Dynamic routing provides no cost benefit — it only degrades quality (#3453).
+ * Uses case-insensitive matching with alias support to prevent fail-open on
+ * provider naming variations (e.g. "copilot" vs "github-copilot").
+ */
+const BUILTIN_FLAT_RATE = new Set(["github-copilot", "copilot", "claude-code"]);
+
+/**
+ * Optional context that lets callers extend flat-rate detection beyond the
+ * hard-coded built-in list.  Either signal on its own is enough to classify
+ * a provider as flat-rate.
+ */
+export interface FlatRateContext {
+  /**
+   * Auth mode for the specific provider being checked, as returned by
+   * `ctx.modelRegistry.getProviderAuthMode(provider)`.  Any provider that
+   * wraps a local CLI (externalCli) is, by definition, a flat-rate
+   * subscription wrapper — every request costs the same regardless of
+   * model, so dynamic routing only degrades quality.
+   */
+  authMode?: "apiKey" | "oauth" | "externalCli" | "none";
+  /**
+   * Case-insensitive list of extra provider IDs the user has declared as
+   * flat-rate via `preferences.flat_rate_providers`.  Used for private
+   * subscription-backed proxies and enterprise-gated deployments that the
+   * built-in list doesn't know about.
+   */
+  userFlatRate?: readonly string[];
+}
+
+export function isFlatRateProvider(provider: string, opts?: FlatRateContext): boolean {
+  const p = provider.toLowerCase();
+  if (BUILTIN_FLAT_RATE.has(p)) return true;
+  if (opts?.userFlatRate?.some(id => id.toLowerCase() === p)) return true;
+  if (opts?.authMode === "externalCli") return true;
+  return false;
+}
+
+/**
+ * Build a FlatRateContext for a given provider from live runtime state.
+ * Safe to call when ctx or prefs are undefined — missing pieces are
+ * treated as "no signal".
+ */
+export function buildFlatRateContext(
+  provider: string,
+  ctx?: { modelRegistry?: { getProviderAuthMode?: (p: string) => string } },
+  prefs?: { flat_rate_providers?: readonly string[] },
+): FlatRateContext {
+  let authMode: FlatRateContext["authMode"];
+  const getAuthMode = ctx?.modelRegistry?.getProviderAuthMode;
+  if (typeof getAuthMode === "function") {
+    try {
+      const mode = getAuthMode(provider);
+      if (mode === "apiKey" || mode === "oauth" || mode === "externalCli" || mode === "none") {
+        authMode = mode;
+      }
+    } catch (err) {
+      // Registry lookup failure must never break flat-rate detection —
+      // fall through with authMode undefined and surface the cause.
+      logWarning(
+        "dispatch",
+        `flat-rate auth-mode lookup failed for ${provider}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return {
+    authMode,
+    userFlatRate: prefs?.flat_rate_providers,
+  };
 }

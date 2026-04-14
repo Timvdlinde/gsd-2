@@ -1,13 +1,19 @@
+// GSD2 — Extension registration: wires all GSD tools, commands, and hooks into pi
+
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
-import { registerGSDCommand } from "../commands.js";
 import { registerExitCommand } from "../exit-command.js";
 import { registerWorktreeCommand } from "../worktree-command.js";
 import { registerDbTools } from "./db-tools.js";
 import { registerDynamicTools } from "./dynamic-tools.js";
 import { registerJournalTools } from "./journal-tools.js";
+import { registerQueryTools } from "./query-tools.js";
 import { registerHooks } from "./register-hooks.js";
 import { registerShortcuts } from "./register-shortcuts.js";
+import { writeCrashLog } from "./crash-log.js";
+import { logWarning } from "../workflow-logger.js";
+
+export { writeCrashLog } from "./crash-log.js";
 
 export function handleRecoverableExtensionProcessError(err: Error): boolean {
   if ((err as NodeJS.ErrnoException).code === "EPIPE") {
@@ -30,17 +36,30 @@ export function handleRecoverableExtensionProcessError(err: Error): boolean {
 function installEpipeGuard(): void {
   if (!process.listeners("uncaughtException").some((listener) => listener.name === "_gsdEpipeGuard")) {
     const _gsdEpipeGuard = (err: Error): void => {
-      if (handleRecoverableExtensionProcessError(err)) {
-        return;
-      }
-      throw err;
+      if (handleRecoverableExtensionProcessError(err)) return;
+      // Write crash log and exit cleanly for unrecoverable errors.
+      // Logging and continuing was the original double-fault fix (#3163), but
+      // continuing in an indeterminate state is worse than a clean exit (#3348).
+      writeCrashLog(err, "uncaughtException");
+      process.exit(1);
     };
     process.on("uncaughtException", _gsdEpipeGuard);
+  }
+
+  if (!process.listeners("unhandledRejection").some((listener) => listener.name === "_gsdRejectionGuard")) {
+    const _gsdRejectionGuard = (reason: unknown, _promise: Promise<unknown>): void => {
+      const err = reason instanceof Error ? reason : new Error(String(reason));
+      if (handleRecoverableExtensionProcessError(err)) return;
+      writeCrashLog(err, "unhandledRejection");
+      process.exit(1);
+    };
+    process.on("unhandledRejection", _gsdRejectionGuard);
   }
 }
 
 export function registerGsdExtension(pi: ExtensionAPI): void {
-  registerGSDCommand(pi);
+  // Note: registerGSDCommand is called by index.ts before this function,
+  // so we intentionally skip it here to avoid double-registration.
   registerWorktreeCommand(pi);
   registerExitCommand(pi);
 
@@ -53,9 +72,25 @@ export function registerGsdExtension(pi: ExtensionAPI): void {
     },
   });
 
-  registerDynamicTools(pi);
-  registerDbTools(pi);
-  registerJournalTools(pi);
-  registerShortcuts(pi);
-  registerHooks(pi);
+  // Wrap non-critical registrations individually so one failure
+  // doesn't prevent the others from loading.
+  const nonCriticalRegistrations: Array<[string, () => void]> = [
+    ["dynamic-tools", () => registerDynamicTools(pi)],
+    ["db-tools", () => registerDbTools(pi)],
+    ["journal-tools", () => registerJournalTools(pi)],
+    ["query-tools", () => registerQueryTools(pi)],
+    ["shortcuts", () => registerShortcuts(pi)],
+    ["hooks", () => registerHooks(pi)],
+  ];
+
+  for (const [name, register] of nonCriticalRegistrations) {
+    try {
+      register();
+    } catch (err) {
+      logWarning(
+        "bootstrap",
+        `Failed to register ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }

@@ -20,7 +20,7 @@ import type {
   ReactiveExecutionConfig,
   GateEvaluationConfig,
 } from "./types.js";
-import type { DynamicRoutingConfig } from "./model-router.js";
+import type { DynamicRoutingConfig, ModelCapabilities } from "./model-router.js";
 
 export interface ContextManagementConfig {
   observation_masking?: boolean;          // default: true
@@ -104,6 +104,16 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "context_management",
   "experimental",
   "codebase",
+  "slice_parallel",
+  "safety_harness",
+  "enhanced_verification",
+  "enhanced_verification_pre",
+  "enhanced_verification_post",
+  "enhanced_verification_strict",
+  "discuss_preparation",
+  "discuss_web_research",
+  "discuss_depth",
+  "flat_rate_providers",
 ]);
 
 /** Canonical list of all dispatch unit types. */
@@ -246,6 +256,8 @@ export interface GSDPreferences {
   post_unit_hooks?: PostUnitHookConfig[];
   pre_dispatch_hooks?: PreDispatchHookConfig[];
   dynamic_routing?: DynamicRoutingConfig;
+  /** Per-model capability overrides. Deep-merged with built-in profiles for capability-aware routing (ADR-004). */
+  modelOverrides?: Record<string, { capabilities?: Partial<ModelCapabilities> }>;
   context_management?: ContextManagementConfig;
   token_profile?: TokenProfile;
   phases?: PhaseSkipPreferences;
@@ -288,6 +300,77 @@ export interface GSDPreferences {
   experimental?: ExperimentalPreferences;
   /** Configuration for the codebase map generator (/gsd codebase). */
   codebase?: CodebaseMapPreferences;
+  /** Slice-level parallelism within a milestone. Disabled by default. */
+  slice_parallel?: { enabled?: boolean; max_workers?: number };
+  /** LLM safety harness configuration. Monitors, validates, and constrains LLM behavior during auto-mode. Enabled by default with warn-and-continue policy. */
+  safety_harness?: {
+    enabled?: boolean;
+    evidence_collection?: boolean;
+    file_change_validation?: boolean;
+    evidence_cross_reference?: boolean;
+    destructive_command_warnings?: boolean;
+    content_validation?: boolean;
+    checkpoints?: boolean;
+    auto_rollback?: boolean;
+    timeout_scale_cap?: number;
+  };
+
+
+  // ─── Enhanced Verification ──────────────────────────────────────────────────
+  /**
+   * Enable enhanced verification (both pre-execution and post-execution checks).
+   * Default: true (opt-out, not opt-in). Set false to disable all enhanced verification.
+   */
+  enhanced_verification?: boolean;
+  /**
+   * Enable pre-execution checks (package existence, file references, etc.).
+   * Only applies when enhanced_verification is true.
+   * Default: true.
+   */
+  enhanced_verification_pre?: boolean;
+  /**
+   * Enable post-execution checks (runtime error detection, audit warnings, etc.).
+   * Only applies when enhanced_verification is true.
+   * Default: true.
+   */
+  enhanced_verification_post?: boolean;
+  /**
+   * Strict mode: treat any pre-execution check failure as blocking.
+   * Default: false (warnings only for non-critical failures).
+   */
+  enhanced_verification_strict?: boolean;
+  /**
+   * Enable the preparation phase before discussion sessions.
+   * Preparation analyzes the codebase, reviews prior context, and optionally researches the ecosystem.
+   * Default: true.
+   */
+  discuss_preparation?: boolean;
+  /**
+   * Enable web research during preparation phase.
+   * When enabled, searches for best practices and known issues for the detected tech stack.
+   * Requires a search API key (TAVILY_API_KEY or BRAVE_API_KEY).
+   * Default: true.
+   */
+  discuss_web_research?: boolean;
+  /**
+   * Depth of preparation analysis.
+   * - "quick": Minimal analysis, fastest (~10s)
+   * - "standard": Balanced analysis (~30s)
+   * - "thorough": Deep analysis with more file sampling (~60s)
+   * Default: "standard".
+   */
+  discuss_depth?: "quick" | "standard" | "thorough";
+  /**
+   * Extra provider IDs to treat as flat-rate (no cost benefit from dynamic
+   * routing).  Dynamic routing is suppressed for any provider listed here,
+   * in addition to the built-in list (github-copilot, copilot, claude-code)
+   * and any provider auto-detected via `authMode: "externalCli"`.
+   *
+   * Intended for private subscription-backed proxies, enterprise-gated
+   * deployments, and custom CLI wrappers where every request costs the
+   * same regardless of model.  Case-insensitive.
+   */
+  flat_rate_providers?: string[];
 }
 
 export interface LoadedGSDPreferences {
@@ -312,4 +395,20 @@ export interface SkillResolutionReport {
   resolutions: Map<string, SkillResolution>;
   /** References that could not be resolved. */
   warnings: string[];
+}
+
+/**
+ * Format a skill reference for the system prompt.
+ * If resolved, shows the path so the agent knows exactly where to read.
+ * If unresolved, marks it clearly.
+ */
+export function formatSkillRef(ref: string, resolutions: Map<string, SkillResolution>): string {
+  const resolution = resolutions.get(ref);
+  if (!resolution || resolution.method === "unresolved") {
+    return `${ref} (⚠ not found — check skill name or path)`;
+  }
+  if (resolution.method === "absolute-path" || resolution.method === "absolute-dir") {
+    return ref;
+  }
+  return `${ref} → \`${resolution.resolvedPath}\``;
 }

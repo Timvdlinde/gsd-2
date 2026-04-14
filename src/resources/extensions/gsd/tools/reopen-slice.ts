@@ -25,6 +25,9 @@ import { renderAllProjections } from "../workflow-projections.js";
 import { writeManifest } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
+import { existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { resolveTasksDir, resolveSlicePath, clearPathCache } from "../paths.js";
 
 export interface ReopenSliceParams {
   milestoneId: string;
@@ -95,6 +98,30 @@ export async function handleReopenSlice(
 
   // ── Invalidate caches ────────────────────────────────────────────────────
   invalidateStateCache();
+
+  // ── Clean up stale filesystem artifacts (M12 fix) ────────────────────────
+  // Without this, the DB-filesystem reconciler sees SUMMARY.md files and
+  // auto-corrects tasks back to "complete", making reopen a no-op (#3161).
+  try {
+    const tasksDir = resolveTasksDir(basePath, params.milestoneId, params.sliceId);
+    if (tasksDir) {
+      const tasks = getSliceTasks(params.milestoneId, params.sliceId);
+      for (const task of tasks) {
+        const summaryPath = join(tasksDir, `${task.id}-SUMMARY.md`);
+        if (existsSync(summaryPath)) unlinkSync(summaryPath);
+      }
+    }
+    const sliceDir = resolveSlicePath(basePath, params.milestoneId, params.sliceId);
+    if (sliceDir) {
+      const sliceSummary = join(sliceDir, `${params.sliceId}-SUMMARY.md`);
+      if (existsSync(sliceSummary)) unlinkSync(sliceSummary);
+      const sliceUat = join(sliceDir, `${params.sliceId}-UAT.md`);
+      if (existsSync(sliceUat)) unlinkSync(sliceUat);
+    }
+  } catch (cleanupErr) {
+    logWarning("tool", `reopen-slice artifact cleanup warning: ${(cleanupErr as Error).message}`);
+  }
+  clearPathCache();
 
   // ── Post-mutation hook ───────────────────────────────────────────────────
   try {

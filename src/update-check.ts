@@ -8,6 +8,7 @@ const CACHE_FILE = join(appRoot, '.update-check')
 const NPM_PACKAGE_NAME = 'gsd-pi'
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const FETCH_TIMEOUT_MS = 5000
+const DEFAULT_REGISTRY_URL = `https://registry.npmjs.org/${NPM_PACKAGE_NAME}/latest`
 
 interface UpdateCheckCache {
   lastCheck: number
@@ -47,10 +48,44 @@ export function writeUpdateCache(cache: UpdateCheckCache, cachePath: string = CA
   }
 }
 
+function normalizeLatestVersion(version: unknown): string | null {
+  if (typeof version !== 'string') return null
+  const trimmed = version.trim().replace(/^v/, '')
+  return trimmed.length > 0 ? trimmed : null
+}
+
+export async function fetchLatestVersionFromRegistry(
+  registryUrl: string = DEFAULT_REGISTRY_URL,
+  fetchTimeoutMs: number = FETCH_TIMEOUT_MS,
+): Promise<string | null> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), fetchTimeoutMs)
+
+  try {
+    const res = await fetch(registryUrl, { signal: controller.signal })
+    if (!res.ok) return null
+
+    const data = (await res.json()) as { version?: string }
+    return normalizeLatestVersion(data.version)
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export function resolveInstallCommand(pkg: string): string {
+  if ('bun' in process.versions) {
+    return `bun add -g ${pkg}`
+  }
+  return `npm install -g ${pkg}`
+}
+
 function printUpdateBanner(current: string, latest: string): void {
+  const installCmd = resolveInstallCommand('gsd-pi')
   process.stderr.write(
     `  ${chalk.yellow('Update available:')} ${chalk.dim(`v${current}`)} → ${chalk.bold(`v${latest}`)}\n` +
-    `  ${chalk.dim('Run')} npm update -g gsd-pi ${chalk.dim('or')} /gsd update ${chalk.dim('to upgrade')}\n\n`,
+    `  ${chalk.dim('Run')} ${installCmd} ${chalk.dim('or')} /gsd update ${chalk.dim('to upgrade')}\n\n`,
   )
 }
 
@@ -70,7 +105,7 @@ export interface UpdateCheckOptions {
 export async function checkForUpdates(options: UpdateCheckOptions = {}): Promise<void> {
   const currentVersion = options.currentVersion || process.env.GSD_VERSION || '0.0.0'
   const cachePath = options.cachePath || CACHE_FILE
-  const registryUrl = options.registryUrl || `https://registry.npmjs.org/${NPM_PACKAGE_NAME}/latest`
+  const registryUrl = options.registryUrl || DEFAULT_REGISTRY_URL
   const checkIntervalMs = options.checkIntervalMs ?? CHECK_INTERVAL_MS
   const fetchTimeoutMs = options.fetchTimeoutMs ?? FETCH_TIMEOUT_MS
   const onUpdate = options.onUpdate || printUpdateBanner
@@ -84,18 +119,8 @@ export async function checkForUpdates(options: UpdateCheckOptions = {}): Promise
     return
   }
 
-  // Fetch latest version from npm registry
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), fetchTimeoutMs)
-
   try {
-    const res = await fetch(registryUrl, { signal: controller.signal })
-    clearTimeout(timeout)
-
-    if (!res.ok) return
-
-    const data = (await res.json()) as { version?: string }
-    const latestVersion = data.version
+    const latestVersion = await fetchLatestVersionFromRegistry(registryUrl, fetchTimeoutMs)
     if (!latestVersion) return
 
     writeUpdateCache({ lastCheck: Date.now(), latestVersion }, cachePath)
@@ -105,8 +130,6 @@ export async function checkForUpdates(options: UpdateCheckOptions = {}): Promise
     }
   } catch {
     // Network error or timeout — silently ignore, don't block startup
-  } finally {
-    clearTimeout(timeout)
   }
 }
 
@@ -123,7 +146,7 @@ const PROMPT_TIMEOUT_MS = 30_000
 export async function checkAndPromptForUpdates(options: UpdateCheckOptions = {}): Promise<boolean> {
   const currentVersion = options.currentVersion || process.env.GSD_VERSION || '0.0.0'
   const cachePath = options.cachePath || CACHE_FILE
-  const registryUrl = options.registryUrl || `https://registry.npmjs.org/${NPM_PACKAGE_NAME}/latest`
+  const registryUrl = options.registryUrl || DEFAULT_REGISTRY_URL
   const checkIntervalMs = options.checkIntervalMs ?? CHECK_INTERVAL_MS
   const fetchTimeoutMs = options.fetchTimeoutMs ?? FETCH_TIMEOUT_MS
 
@@ -134,22 +157,13 @@ export async function checkAndPromptForUpdates(options: UpdateCheckOptions = {})
   if (cache && Date.now() - cache.lastCheck < checkIntervalMs) {
     latestVersion = cache.latestVersion
   } else {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), fetchTimeoutMs)
     try {
-      const res = await fetch(registryUrl, { signal: controller.signal })
-      clearTimeout(timeout)
-      if (res.ok) {
-        const data = (await res.json()) as { version?: string }
-        if (data.version) {
-          latestVersion = data.version
-          writeUpdateCache({ lastCheck: Date.now(), latestVersion }, cachePath)
-        }
+      latestVersion = await fetchLatestVersionFromRegistry(registryUrl, fetchTimeoutMs)
+      if (latestVersion) {
+        writeUpdateCache({ lastCheck: Date.now(), latestVersion }, cachePath)
       }
     } catch {
       // Network unavailable — silently skip
-    } finally {
-      clearTimeout(timeout)
     }
   }
 
@@ -178,7 +192,7 @@ export async function checkAndPromptForUpdates(options: UpdateCheckOptions = {})
 
   const choice = await new Promise<string>((resolve) => {
     process.stderr.write(
-      `  ${chalk.bold('[1]')} Update now   ${chalk.dim(`npm install -g ${NPM_PACKAGE_NAME}@latest`)}\n` +
+      `  ${chalk.bold('[1]')} Update now   ${chalk.dim(resolveInstallCommand(`${NPM_PACKAGE_NAME}@latest`))}\n` +
       `  ${chalk.bold('[2]')} Skip\n\n`,
     )
 
@@ -204,13 +218,14 @@ export async function checkAndPromptForUpdates(options: UpdateCheckOptions = {})
   process.stdin.pause()
 
   if (choice === '1') {
-    process.stderr.write(`\n  ${chalk.dim('Running:')} npm install -g ${NPM_PACKAGE_NAME}@latest\n\n`)
+    const installCmd = resolveInstallCommand(`${NPM_PACKAGE_NAME}@latest`)
+    process.stderr.write(`\n  ${chalk.dim('Running:')} ${installCmd}\n\n`)
     try {
-      execSync(`npm install -g ${NPM_PACKAGE_NAME}@latest`, { stdio: 'inherit' })
+      execSync(installCmd, { stdio: 'inherit' })
       process.stderr.write(`\n  ${chalk.green.bold(`✓ Updated to v${latestVersion}`)}\n\n`)
       return true
     } catch {
-      process.stderr.write(`\n  ${chalk.yellow(`Update failed. You can run: npm install -g ${NPM_PACKAGE_NAME}@latest`)}\n\n`)
+      process.stderr.write(`\n  ${chalk.yellow(`Update failed. You can run: ${installCmd}`)}\n\n`)
     }
   } else {
     process.stderr.write(`  ${chalk.dim('Skipped. Run')} gsd update ${chalk.dim('anytime to upgrade.')}\n\n`)

@@ -691,7 +691,7 @@ describe("transition boundary failures", () => {
     );
   });
 
-  test("blocked state: all slices have unmet deps → blocked phase", async () => {
+  test("blocked state: all slices have unmet deps → fallback picks slice", async () => {
     base = makeTempDir();
     const mDir = join(base, ".gsd", "milestones", "M001");
     mkdirSync(join(mDir, "slices", "S01", "tasks"), { recursive: true });
@@ -736,7 +736,9 @@ describe("transition boundary failures", () => {
 
     invalidateAllCaches();
     const state = await deriveStateFromDb(base);
-    assert.equal(state.phase, "blocked", "circular deps should produce blocked phase");
+    // With partial-dep fallback, circular deps no longer block — fallback picks first eligible slice
+    assert.equal(state.phase, "planning", "circular deps: fallback picks a slice instead of blocking");
+    assert.ok(state.activeSlice !== null, "activeSlice set via fallback");
   });
 });
 
@@ -920,8 +922,10 @@ describe("completion and verification failures", () => {
     base = createFullFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
-    insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "complete" });
+    // Use "pending" status — closed slices (complete/done/skipped) are
+    // excluded from SUMMARY checks per #3620.
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "pending" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "pending" });
     // No S01-SUMMARY.md or S02-SUMMARY.md on disk
 
     const ctx = buildDispatchCtx(base, "M001", {

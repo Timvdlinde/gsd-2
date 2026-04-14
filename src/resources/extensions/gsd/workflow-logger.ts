@@ -19,6 +19,8 @@
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { appendNotification } from "./notification-store.js";
+
 // ─── Types ──────────────────────────────────────────────────────────────
 
 export type LogSeverity = "warn" | "error";
@@ -48,7 +50,8 @@ export type LogComponent =
   | "bootstrap"     // Extension bootstrap (system-context, agent-end)
   | "guided"        // Guided flow (discuss, plan wizards)
   | "registry"      // Rule registry hook state
-  | "renderer";     // Markdown renderer and projections
+  | "renderer"      // Markdown renderer and projections
+  | "safety";       // LLM safety harness
 
 export interface LogEntry {
   ts: string;
@@ -64,6 +67,7 @@ export interface LogEntry {
 const MAX_BUFFER = 100;
 let _buffer: LogEntry[] = [];
 let _auditBasePath: string | null = null;
+let _stderrEnabled = true;
 
 /**
  * Set the base path for persistent audit log writes.
@@ -72,6 +76,16 @@ let _auditBasePath: string | null = null;
  */
 export function setLogBasePath(basePath: string): void {
   _auditBasePath = basePath;
+}
+
+/**
+ * Enable or disable immediate stderr writes for workflow logs.
+ * Returns the previous setting so callers can restore it.
+ */
+export function setStderrLoggingEnabled(enabled: boolean): boolean {
+  const previous = _stderrEnabled;
+  _stderrEnabled = enabled;
+  return previous;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────
@@ -174,17 +188,22 @@ export function summarizeLogs(): string | null {
 
 /**
  * Format entries for display (used by auto-loop post-unit notification).
- * Note: context fields are not included in the formatted output.
+ * Includes key context fields (file paths, commands) when present.
  */
 export function formatForNotification(entries: readonly LogEntry[]): string {
   if (entries.length === 0) return "";
-  if (entries.length === 1) {
-    const e = entries[0];
-    return `[${e.component}] ${e.message}`;
-  }
-  return entries
-    .map((e) => `[${e.component}] ${e.message}`)
-    .join("\n");
+  return entries.map((e) => {
+    let line = `[${e.component}] ${e.message}`;
+    if (e.context) {
+      const ctxParts = Object.entries(e.context)
+        .filter(([k]) => k !== "error") // error is redundant with message
+        .map(([k, v]) => v.includes(",") ? `${k}: "${v}"` : `${k}: ${v}`);
+      if (ctxParts.length > 0) {
+        line += ` (${ctxParts.join(", ")})`;
+      }
+    }
+    return line;
+  }).join("\n");
 }
 
 /**
@@ -237,7 +256,18 @@ function _push(
   // Always forward to stderr so terminal watchers see it (see module header for policy)
   const prefix = severity === "error" ? "ERROR" : "WARN";
   const ctxStr = context ? ` ${JSON.stringify(context)}` : "";
-  process.stderr.write(`[gsd:${component}] ${prefix}: ${message}${ctxStr}\n`);
+  _writeStderr(`[gsd:${component}] ${prefix}: ${message}${ctxStr}\n`);
+
+  // Persist to notification store (both warnings and errors)
+  try {
+    appendNotification(
+      `[${component}] ${message}`,
+      severity === "error" ? "error" : "warning",
+      "workflow-logger",
+    );
+  } catch (notifErr) {
+    _writeStderr(`[gsd:workflow-logger] notification-store append failed: ${(notifErr as Error).message}\n`);
+  }
 
   // Buffer for auto-loop to drain
   _buffer.push(entry);
@@ -256,9 +286,14 @@ function _push(
       appendFileSync(join(auditDir, "audit-log.jsonl"), JSON.stringify(sanitized) + "\n", "utf-8");
     } catch (auditErr) {
       // Best-effort — never let audit write failures bubble up
-      process.stderr.write(`[gsd:audit] failed to persist log entry: ${(auditErr as Error).message}\n`);
+      _writeStderr(`[gsd:audit] failed to persist log entry: ${(auditErr as Error).message}\n`);
     }
   }
+}
+
+function _writeStderr(message: string): void {
+  if (!_stderrEnabled) return;
+  process.stderr.write(message);
 }
 
 /**
@@ -276,7 +311,7 @@ function _sanitizeForAudit(entry: LogEntry): LogEntry {
   };
   if (entry.context) {
     // Allowlist: only persist known-safe structured keys
-    const SAFE_KEYS = new Set(["fn", "tool", "mid", "sid", "tid", "worktree"]);
+    const SAFE_KEYS = new Set(["fn", "tool", "mid", "sid", "tid", "worktree", "id", "error", "count"]);
     const filtered: Record<string, string> = {};
     for (const [k, v] of Object.entries(entry.context)) {
       if (SAFE_KEYS.has(k)) {

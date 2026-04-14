@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path'
 import type { AuthStorage } from '@gsd/pi-coding-agent'
 import { renderLogo } from './logo.js'
 import { agentDir } from './app-paths.js'
+import { isClaudeCliReady } from './claude-cli-check.js'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,7 @@ const TOOL_KEYS: ToolKeyConfig[] = [
 const LLM_PROVIDER_IDS = [
   'anthropic',
   'anthropic-vertex',
+  'claude-code',
   'openai',
   'github-copilot',
   'openai-codex',
@@ -86,21 +88,20 @@ const API_KEY_PREFIXES: Record<string, string[]> = {
 }
 
 const OTHER_PROVIDERS = [
-  { value: 'google', label: 'Google (Gemini)' },
-  { value: 'groq', label: 'Groq' },
-  { value: 'xai', label: 'xAI (Grok)' },
-  { value: 'openrouter', label: 'OpenRouter' },
-  { value: 'mistral', label: 'Mistral' },
-  { value: 'ollama', label: 'Ollama (Local)' },
+  { value: 'google', label: 'Google (Gemini)', hint: 'aistudio.google.com/app/apikey' },
+  { value: 'groq', label: 'Groq', hint: 'console.groq.com/keys' },
+  { value: 'xai', label: 'xAI (Grok)', hint: 'console.x.ai' },
+  { value: 'openrouter', label: 'OpenRouter', hint: '200+ models — openrouter.ai/keys' },
+  { value: 'mistral', label: 'Mistral', hint: 'console.mistral.ai/api-keys' },
   { value: 'ollama-cloud', label: 'Ollama Cloud' },
-  { value: 'custom-openai', label: 'Custom (OpenAI-compatible)' },
+  { value: 'custom-openai', label: 'Custom (OpenAI-compatible)', hint: 'Ollama, LM Studio, vLLM, proxies — see docs/providers.md' },
 ]
 
 // ─── Dynamic imports ──────────────────────────────────────────────────────────
 
 /**
- * Dynamically import @clack/prompts and picocolors.
- * Dynamic import with fallback so the module doesn't crash if they're missing.
+ * Dynamically import @clack/prompts.
+ * Dynamic import with fallback so the module doesn't crash if it's missing.
  */
 async function loadClack(): Promise<ClackModule> {
   try {
@@ -110,10 +111,23 @@ async function loadClack(): Promise<ClackModule> {
   }
 }
 
+/**
+ * Build the PicoModule color surface from chalk. Chalk is already a
+ * dependency of the CLI; this adapter keeps the onboarding call sites stable
+ * while removing the redundant picocolors dep.
+ */
 async function loadPico(): Promise<PicoModule> {
   try {
-    const mod = await import('picocolors')
-    return mod.default ?? mod
+    const { default: chalk } = await import('chalk')
+    return {
+      cyan: (s: string) => chalk.cyan(s),
+      green: (s: string) => chalk.green(s),
+      yellow: (s: string) => chalk.yellow(s),
+      dim: (s: string) => chalk.dim(s),
+      bold: (s: string) => chalk.bold(s),
+      red: (s: string) => chalk.red(s),
+      reset: (s: string) => chalk.reset(s),
+    }
   } catch {
     // Fallback: return identity functions
     const identity = (s: string) => s
@@ -134,9 +148,34 @@ function openBrowser(url: string): void {
   }
 }
 
-/** Check if an error is a clack cancel signal */
-function isCancelError(p: ClackModule, err: unknown): boolean {
-  return p.isCancel(err)
+/** Sentinel returned by runStep when the user cancels — tells the caller
+ *  to abort the entire wizard. */
+const STEP_CANCELLED = Symbol('step-cancelled')
+type StepCancelled = typeof STEP_CANCELLED
+
+/**
+ * Run a single onboarding step with shared error handling:
+ *   - user cancel (Ctrl+C) → p.cancel(cancelMessage), returns STEP_CANCELLED
+ *   - other error → p.log.warn + optional info follow-up, returns null
+ *   - success → the step's return value
+ */
+async function runStep<T>(
+  p: ClackModule,
+  warnLabel: string,
+  fn: () => Promise<T>,
+  opts: { cancelMessage?: string; errorInfo?: string } = {},
+): Promise<T | null | StepCancelled> {
+  try {
+    return await fn()
+  } catch (err) {
+    if (p.isCancel(err)) {
+      p.cancel(opts.cancelMessage ?? 'Setup cancelled.')
+      return STEP_CANCELLED
+    }
+    p.log.warn(`${warnLabel}: ${err instanceof Error ? err.message : String(err)}`)
+    if (opts.errorInfo) p.log.info(opts.errorInfo)
+    return null
+  }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -190,54 +229,30 @@ export async function runOnboarding(authStorage: AuthStorage): Promise<void> {
   p.intro(pc.bold('Welcome to GSD — let\'s get you set up'))
 
   // ── LLM Provider Selection ────────────────────────────────────────────────
-  let llmConfigured = false
-  try {
-    llmConfigured = await runLlmStep(p, pc, authStorage)
-  } catch (err) {
-    // User cancelled (Ctrl+C in clack throws) or unexpected error
-    if (isCancelError(p, err)) {
-      p.cancel('Setup cancelled — you can run /login inside GSD later.')
-      return
-    }
-    p.log.warn(`LLM setup failed: ${err instanceof Error ? err.message : String(err)}`)
-    p.log.info('You can configure your LLM provider later with /login inside GSD.')
-  }
+  const llmResult = await runStep(p, 'LLM setup failed', () => runLlmStep(p, pc, authStorage), {
+    cancelMessage: 'Setup cancelled — you can run /login inside GSD later.',
+    errorInfo: 'You can configure your LLM provider later with /login inside GSD.',
+  })
+  if (llmResult === STEP_CANCELLED) return
+  const llmConfigured = llmResult ?? false
 
   // ── Web Search Provider ──────────────────────────────────────────────────
-  let searchConfigured: string | null = null
-  try {
-    searchConfigured = await runWebSearchStep(p, pc, authStorage, llmConfigured)
-  } catch (err) {
-    if (isCancelError(p, err)) {
-      p.cancel('Setup cancelled.')
-      return
-    }
-    p.log.warn(`Web search setup failed: ${err instanceof Error ? err.message : String(err)}`)
-  }
+  const searchResult = await runStep(p, 'Web search setup failed',
+    () => runWebSearchStep(p, pc, authStorage, llmConfigured))
+  if (searchResult === STEP_CANCELLED) return
+  const searchConfigured = searchResult
 
   // ── Remote Questions ─────────────────────────────────────────────────────
-  let remoteConfigured: string | null = null
-  try {
-    remoteConfigured = await runRemoteQuestionsStep(p, pc, authStorage)
-  } catch (err) {
-    if (isCancelError(p, err)) {
-      p.cancel('Setup cancelled.')
-      return
-    }
-    p.log.warn(`Remote questions setup failed: ${err instanceof Error ? err.message : String(err)}`)
-  }
+  const remoteResult = await runStep(p, 'Remote questions setup failed',
+    () => runRemoteQuestionsStep(p, pc, authStorage))
+  if (remoteResult === STEP_CANCELLED) return
+  const remoteConfigured = remoteResult
 
   // ── Tool API Keys ─────────────────────────────────────────────────────────
-  let toolKeyCount = 0
-  try {
-    toolKeyCount = await runToolKeysStep(p, pc, authStorage)
-  } catch (err) {
-    if (isCancelError(p, err)) {
-      p.cancel('Setup cancelled.')
-      return
-    }
-    p.log.warn(`Tool key setup failed: ${err instanceof Error ? err.message : String(err)}`)
-  }
+  const toolResult = await runStep(p, 'Tool key setup failed',
+    () => runToolKeysStep(p, pc, authStorage))
+  if (toolResult === STEP_CANCELLED) return
+  const toolKeyCount = toolResult ?? 0
 
   // ── Summary ───────────────────────────────────────────────────────────────
   const summaryLines: string[] = []
@@ -294,8 +309,16 @@ async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: AuthStora
     authOptions.push({ value: 'keep', label: `Keep current (${existingAuth})`, hint: 'already configured' })
   }
 
+  // Show Claude Code CLI option at the top when the CLI is installed and authenticated (#3772).
+  // This is the only TOS-compliant path for Anthropic subscription users.
+  if (isClaudeCliReady()) {
+    authOptions.push(
+      { value: 'claude-cli', label: 'Use Claude Code CLI', hint: 'recommended — uses your existing Claude subscription' },
+    )
+  }
+
   authOptions.push(
-    { value: 'browser', label: 'Sign in with your browser', hint: 'recommended — same login as claude.ai / ChatGPT' },
+    { value: 'browser', label: 'Sign in with your browser', hint: 'GitHub Copilot, ChatGPT, Google, etc.' },
     { value: 'api-key', label: 'Paste an API key', hint: 'from your provider dashboard' },
     { value: 'skip', label: 'Skip for now', hint: 'use /login inside GSD later' },
   )
@@ -308,12 +331,32 @@ async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: AuthStora
   if (p.isCancel(method) || method === 'skip') return false
   if (method === 'keep') return true
 
+  // ── Claude Code CLI path (#3772) ────────────────────────────────────────
+  if (method === 'claude-cli') {
+    p.log.success('Claude Code CLI detected — routing through local CLI (TOS-compliant)')
+    p.log.info('Your Claude subscription will be used for inference. No API key needed.')
+    // Store sentinel so hasAuth('claude-code') returns true on future boots
+    authStorage.set('claude-code', { type: 'api_key', key: 'cli' })
+    // Persist claude-code as the default provider so the startup migration in
+    // cli.ts does not need to fire and the user is not left on "anthropic".
+    const settingsPath = join(agentDir, 'settings.json')
+    try {
+      const raw = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf-8')) : {}
+      raw.defaultProvider = 'claude-code'
+      mkdirSync(dirname(settingsPath), { recursive: true })
+      writeFileSync(settingsPath, JSON.stringify(raw, null, 2), 'utf-8')
+    } catch { /* non-fatal — startup migration will catch it */ }
+    return true
+  }
+
   // ── Step 2: Which provider? ──────────────────────────────────────────────
   if (method === 'browser') {
+    // Anthropic OAuth is removed from browser auth — it violates Anthropic TOS for
+    // third-party apps (#3772). Anthropic subscription users should use the Claude
+    // Code CLI path (shown above when CLI is installed) or paste an API key.
     const provider = await p.select({
       message: 'Choose provider',
       options: [
-        { value: 'anthropic', label: 'Anthropic (Claude)', hint: 'recommended' },
         { value: 'github-copilot', label: 'GitHub Copilot' },
         { value: 'openai-codex', label: 'ChatGPT Plus/Pro (Codex)' },
         { value: 'google-gemini-cli', label: 'Google Gemini CLI' },
@@ -446,6 +489,13 @@ async function runApiKeyFlow(
 
   authStorage.set(providerId, { type: 'api_key', key: trimmed })
   p.log.success(`API key saved for ${pc.green(providerLabel)}`)
+
+  // Provider-specific post-setup hints
+  if (providerId === 'openrouter') {
+    p.log.info(`Use ${pc.cyan('/model')} inside GSD to pick an OpenRouter model.`)
+    p.log.info(`To add custom models or control routing, see ${pc.dim('docs/providers.md#openrouter')}`)
+  }
+
   return true
 }
 
@@ -504,10 +554,12 @@ async function runCustomOpenAIFlow(
   pc: PicoModule,
   authStorage: AuthStorage,
 ): Promise<boolean> {
+  p.log.info(pc.dim('Common endpoints:\n  Ollama:     http://localhost:11434/v1\n  LM Studio:  http://localhost:1234/v1\n  vLLM:       http://localhost:8000/v1'))
+
   // Prompt for base URL
   const baseUrl = await p.text({
     message: 'Base URL of your OpenAI-compatible endpoint:',
-    placeholder: 'https://my-proxy.example.com/v1',
+    placeholder: 'http://localhost:11434/v1',
     validate: (val) => {
       const trimmed = val?.trim()
       if (!trimmed) return 'Base URL is required'
@@ -588,6 +640,8 @@ async function runCustomOpenAIFlow(
   p.log.success(`Custom endpoint saved: ${pc.green(trimmedUrl)}`)
   p.log.info(`Model: ${pc.cyan(trimmedModelId)}`)
   p.log.info(`Config written to ${pc.dim(modelsJsonPath)}`)
+  p.log.info(`If you get role or streaming errors, add compat settings to models.json.`)
+  p.log.info(`See ${pc.dim('docs/providers.md#common-pitfalls')} for details.`)
   return true
 }
 

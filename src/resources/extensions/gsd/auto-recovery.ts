@@ -9,10 +9,11 @@
 
 import type { ExtensionContext } from "@gsd/pi-coding-agent";
 import { parseUnitId } from "./unit-id.js";
+import { appendEvent } from "./workflow-events.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { clearParseCache } from "./files.js";
 import { parseRoadmap as parseLegacyRoadmap, parsePlan as parseLegacyPlan } from "./parsers-legacy.js";
-import { isDbAvailable, getTask, getSlice, getSliceTasks, updateTaskStatus } from "./gsd-db.js";
+import { isDbAvailable, getTask, getSlice, getSliceTasks, getPendingGates, updateTaskStatus, updateSliceStatus } from "./gsd-db.js";
 import { isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
@@ -60,13 +61,12 @@ export { resolveExpectedArtifactPath, diagnoseExpectedArtifact };
  * in the git history. Uses `git log --name-only` to inspect all commits on the
  * current branch that touch files outside `.gsd/`.
  *
- * Returns true if at least one non-`.gsd/` file was committed, false otherwise.
- * Non-fatal: returns true on git errors to avoid blocking the pipeline when
- * running outside a git repo (e.g., tests).
+ * Returns "present" if implementation files found, "absent" if only .gsd/ files,
+ * "unknown" if git is unavailable or check failed (callers decide how to handle).
  */
-export function hasImplementationArtifacts(basePath: string): boolean {
+export function hasImplementationArtifacts(basePath: string): "present" | "absent" | "unknown" {
   try {
-    // Verify we're in a git repo — fail open if not
+    // Verify we're in a git repo
     try {
       execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
         cwd: basePath,
@@ -75,7 +75,7 @@ export function hasImplementationArtifacts(basePath: string): boolean {
       });
     } catch (e) {
       logWarning("recovery", `git rev-parse check failed: ${(e as Error).message}`);
-      return true;
+      return "unknown";
     }
 
     // Strategy: check `git diff --name-only` against the merge-base with the
@@ -85,19 +85,19 @@ export function hasImplementationArtifacts(basePath: string): boolean {
     const mainBranch = detectMainBranch(basePath);
     const changedFiles = getChangedFilesSinceBranch(basePath, mainBranch);
 
-    // No files changed at all — fail open (could be detached HEAD, single-
+    // No files changed at all — unknown (could be detached HEAD, single-
     // commit repo, or other edge case where git diff returns nothing).
-    if (changedFiles.length === 0) return true;
+    if (changedFiles.length === 0) return "unknown";
 
     // Filter out .gsd/ files — only implementation files count.
     // If every changed file is under .gsd/, the milestone produced no
     // implementation code (#1703).
     const implFiles = changedFiles.filter(f => !f.startsWith(".gsd/") && !f.startsWith(".gsd\\"));
-    return implFiles.length > 0;
+    return implFiles.length > 0 ? "present" : "absent";
   } catch (e) {
-    // Non-fatal — if git operations fail, don't block the pipeline
+    // Non-fatal — if git operations fail, return unknown so callers can decide
     logWarning("recovery", `implementation artifact check failed: ${(e as Error).message}`);
-    return true;
+    return "unknown";
   }
 }
 
@@ -248,8 +248,7 @@ export function verifyExpectedArtifact(
     if (gateIds.length === 0) return true;
 
     try {
-      const { getPendingGates: getPending } = require("./gsd-db.js");
-      const pending = getPending(mid, sid, "slice");
+      const pending = getPendingGates(mid, sid, "slice");
       const pendingIds = new Set(pending.map((g: any) => g.gate_id));
       // All dispatched gates must no longer be pending
       for (const gid of gateIds) {
@@ -273,6 +272,16 @@ export function verifyExpectedArtifact(
     if (!isValidationTerminal(validationContent)) return false;
   }
 
+  if (unitType === "plan-milestone") {
+    try {
+      const roadmap = parseLegacyRoadmap(readFileSync(absPath, "utf-8"));
+      if (roadmap.slices.length === 0) return false;
+    } catch (err) {
+      logWarning("recovery", `plan-milestone roadmap verification failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
   // plan-slice must produce a plan with actual task entries, not just a scaffold.
   // The plan file may exist from a prior discussion/context step with only headings
   // but no tasks. Without this check the artifact is considered "complete" and the
@@ -286,7 +295,7 @@ export function verifyExpectedArtifact(
     if (!hasCheckboxTask && !hasHeadingTask) return false;
   }
 
-  // execute-task: DB status is authoritative. Fall back to heading-style plan
+  // execute-task: DB status is authoritative. Fall back to checked-checkbox
   // detection when the DB is unavailable (unmigrated projects).
   if (unitType === "execute-task") {
     const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
@@ -297,20 +306,22 @@ export function verifyExpectedArtifact(
         if (dbTask.status !== "complete" && dbTask.status !== "done") return false;
       } else if (!isDbAvailable()) {
         // LEGACY: Pre-migration fallback for projects without DB.
-        // Fall back to plan heading check (format detection, not reconciliation).
-        // Heading-style entries (### T01 --) count as verified because the
-        // summary file existence (checked above) is the real signal.
+        // Require a CHECKED checkbox — a bare heading or unchecked checkbox
+        // does not prove gsd_complete_task ran. Summary file on disk alone
+        // is not sufficient evidence (could be a rogue write) (#3607).
         const planAbs = resolveSliceFile(base, mid, sid, "PLAN");
         if (planAbs && existsSync(planAbs)) {
           const planContent = readFileSync(planAbs, "utf-8");
           const escapedTid = tid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const hdRe = new RegExp(`^#{2,4}\\s+${escapedTid}\\s*(?:--|—|:)`, "m");
           const cbRe = new RegExp(`^- \\[[xX]\\] \\*\\*${escapedTid}:`, "m");
-          if (!hdRe.test(planContent) && !cbRe.test(planContent)) return false;
+          if (!cbRe.test(planContent)) return false;
+        } else {
+          return false; // no plan file → cannot verify
         }
+      } else {
+        // DB available but task row not found — completion tool never ran (#3607)
+        return false;
       }
-      // else: DB available but task not found — summary file exists (checked above),
-      // so treat as verified (task may not be imported yet)
     }
   }
 
@@ -392,7 +403,7 @@ export function verifyExpectedArtifact(
   // A milestone with only .gsd/ plan files and zero implementation code is
   // not genuinely complete — the LLM wrote plan files but skipped actual work.
   if (unitType === "complete-milestone") {
-    if (!hasImplementationArtifacts(base)) return false;
+    if (hasImplementationArtifacts(base) === "absent") return false;
   }
 
   return true;
@@ -424,15 +435,20 @@ export function writeBlockerPlaceholder(
   ].join("\n");
   writeFileSync(absPath, content, "utf-8");
 
-  // Mark the task as complete in the DB so verifyExpectedArtifact passes.
+  // Mark the task/slice as complete in the DB so verifyExpectedArtifact passes.
   // Without this, the DB status stays "pending" and the dispatch loop
-  // re-derives the same task indefinitely (#2531).
-  if (unitType === "execute-task" && isDbAvailable()) {
+  // re-derives the same unit indefinitely (#2531, #2653).
+  if (isDbAvailable()) {
     const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
-    if (mid && sid && tid) {
-      try { updateTaskStatus(mid, sid, tid, "complete", new Date().toISOString()); } catch (err) { /* non-fatal */
-        logError("recovery", `DB status update failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    const ts = new Date().toISOString();
+    if (unitType === "execute-task" && mid && sid && tid) {
+      try { updateTaskStatus(mid, sid, tid, "complete", ts); } catch (e) { logWarning("recovery", `updateTaskStatus failed during context exhaustion: ${e instanceof Error ? e.message : String(e)}`); }
+      // Append event so worktree reconciliation can replay this recovery completion
+      try { appendEvent(base, { cmd: "complete-task", params: { milestoneId: mid, sliceId: sid, taskId: tid }, ts, actor: "system", trigger_reason: "blocker-placeholder-recovery" }); } catch (e) { logWarning("recovery", `appendEvent failed for task recovery: ${e instanceof Error ? e.message : String(e)}`); }
+    }
+    if (unitType === "complete-slice" && mid && sid) {
+      try { updateSliceStatus(mid, sid, "complete", ts); } catch (e) { logWarning("recovery", `updateSliceStatus failed during context exhaustion: ${e instanceof Error ? e.message : String(e)}`); }
+      try { appendEvent(base, { cmd: "complete-slice", params: { milestoneId: mid, sliceId: sid }, ts, actor: "system", trigger_reason: "blocker-placeholder-recovery" }); } catch (e) { logWarning("recovery", `appendEvent failed for slice recovery: ${e instanceof Error ? e.message : String(e)}`); }
     }
   }
 
@@ -473,28 +489,29 @@ function abortAndResetMerge(
   }
 }
 
+export type MergeReconcileResult = "clean" | "reconciled" | "blocked";
+
 /**
  * Detect leftover merge state from a prior session and reconcile it.
  * If MERGE_HEAD or SQUASH_MSG exists, check whether conflicts are resolved.
- * If resolved: finalize the commit. If still conflicted: abort and reset.
- *
- * Returns true if state was dirty and re-derivation is needed.
+ * If resolved: finalize the commit. If only .gsd conflicts remain: auto-resolve.
+ * If code conflicts remain: fail safe without modifying the worktree.
  */
 export function reconcileMergeState(
   basePath: string,
   ctx: ExtensionContext,
-): boolean {
+): MergeReconcileResult {
   const mergeHeadPath = join(basePath, ".git", "MERGE_HEAD");
   const squashMsgPath = join(basePath, ".git", "SQUASH_MSG");
   const hasMergeHead = existsSync(mergeHeadPath);
   const hasSquashMsg = existsSync(squashMsgPath);
-  if (!hasMergeHead && !hasSquashMsg) return false;
+  if (!hasMergeHead && !hasSquashMsg) return "clean";
 
   const conflictedFiles = nativeConflictFiles(basePath);
   if (conflictedFiles.length === 0) {
     // All conflicts resolved — finalize the merge/squash commit
     try {
-      const commitSha = nativeCommit(basePath, ""); // --no-edit equivalent: use empty message placeholder
+      const commitSha = nativeCommit(basePath, "chore(gsd): reconcile merge state");
       if (commitSha) {
         const mode = hasMergeHead ? "merge" : "squash commit";
         ctx.ui.notify(`Finalized leftover ${mode} from prior session.`, "info");
@@ -504,7 +521,7 @@ export function reconcileMergeState(
     } catch (err) {
       const errorMessage = getErrorMessage(err);
       ctx.ui.notify(`Failed to finalize leftover merge/squash commit: ${errorMessage}`, "error");
-      return false;
+      return "blocked";
     }
   } else {
     // Still conflicted — try auto-resolving .gsd/ state file conflicts (#530)
@@ -544,15 +561,16 @@ export function reconcileMergeState(
         );
       }
     } else {
-      // Code conflicts present — abort and reset
-      abortAndResetMerge(basePath, hasMergeHead, squashMsgPath);
+      // Code conflicts present — fail safe and preserve any manual resolution
+      // work instead of discarding it with merge --abort/reset --hard.
       ctx.ui.notify(
-        "Detected leftover merge state with unresolved conflicts — cleaned up. Re-deriving state.",
-        "warning",
+        "Detected leftover merge state with unresolved code conflicts. Auto-mode will pause without modifying the worktree so manual conflict resolution is preserved.",
+        "error",
       );
+      return "blocked";
     }
   }
-  return true;
+  return "reconciled";
 }
 
 // ─── Loop Remediation ─────────────────────────────────────────────────────────
@@ -611,4 +629,3 @@ export function buildLoopRemediationSteps(
   }
   return null;
 }
-

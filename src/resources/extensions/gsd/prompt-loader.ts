@@ -51,6 +51,14 @@ const __extensionDir = resolveExtensionDir();
 const promptsDir = join(__extensionDir, "prompts");
 const templatesDir = join(__extensionDir, "templates");
 
+/**
+ * Return the resolved templates directory path for use in prompts.
+ * Avoids hardcoding `~/.gsd/agent/extensions/gsd/templates/` in templates. (#3575)
+ */
+export function getTemplatesDir(): string {
+  return templatesDir;
+}
+
 // Cache all templates eagerly at module load — a running session uses the
 // template versions that were on disk at startup, immune to later overwrites.
 const templateCache = new Map<string, string>();
@@ -135,10 +143,15 @@ export function loadPrompt(name: string, vars: Record<string, string> = {}): str
   }
 
   for (const [key, value] of Object.entries(effectiveVars)) {
+    const safeValue =
+      key === "workingDirectory" && typeof value === "string"
+        ? value.replaceAll("\\", "/")
+        : value;
+
     // Use split/join instead of replaceAll to avoid JavaScript's special
     // replacement patterns ($', $`, $&) being interpreted in the value.
     // See: https://github.com/gsd-build/gsd-2/issues/2968
-    content = content.split(`{{${key}}}`).join(value);
+    content = content.split(`{{${key}}}`).join(safeValue);
   }
 
   return content.trim();

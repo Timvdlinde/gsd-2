@@ -106,8 +106,9 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
     }
   }
   const estimateMinutes = taskEstimate ? parseEstimateMinutes(taskEstimate) : null;
+  const MAX_TIMEOUT_SCALE = 6; // Cap at 6x (60min task). Prevents 2h+ tasks from creating 120min+ timeout windows.
   const timeoutScale = estimateMinutes && estimateMinutes > 0
-    ? Math.max(1, estimateMinutes / 10)  // 10min task = 1x, 30min = 3x, 2h = 12x
+    ? Math.min(MAX_TIMEOUT_SCALE, Math.max(1, estimateMinutes / 10))
     : 1;
 
   const softTimeoutMs = (supervisor.soft_timeout_minutes ?? 0) * 60 * 1000 * timeoutScale;
@@ -122,6 +123,10 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
       phase: "wrapup-warning-sent",
       wrapupWarningSent: true,
     });
+    // Only trigger a new turn if no tools are currently in flight.
+    // Triggering during active tool calls causes tool results to be skipped
+    // with "Skipped due to queued user message", leading to provider errors (#3512).
+    const softTrigger = getInFlightToolCount() === 0;
     pi.sendMessage(
       {
         customType: "gsd-auto-wrapup",
@@ -136,7 +141,7 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
           "4. leave precise resume notes if anything remains unfinished",
         ].join("\n"),
       },
-      { triggerTurn: true },
+      { triggerTurn: softTrigger },
     );
   }, softTimeoutMs);
 
@@ -293,6 +298,8 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
       );
     }
 
+    // Only trigger a new turn if no tools are currently in flight (#3512).
+    const contextTrigger = getInFlightToolCount() === 0;
     pi.sendMessage(
       {
         customType: "gsd-auto-wrapup",
@@ -308,7 +315,7 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
           "Do NOT start new sub-tasks or investigations.",
         ].join("\n"),
       },
-      { triggerTurn: true },
+      { triggerTurn: contextTrigger },
     );
 
     if (s.continueHereHandle) {

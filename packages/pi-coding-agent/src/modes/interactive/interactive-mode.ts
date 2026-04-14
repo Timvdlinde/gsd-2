@@ -7,6 +7,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { listDescendants } from "@gsd/native";
 import type { AgentMessage } from "@gsd/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId } from "@gsd/pi-ai";
 import type {
@@ -78,7 +79,7 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
 import { appKey, appKeyHint, editorKey, formatKeyForDisplay, keyHint, rawKeyHint } from "./components/keybinding-hints.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
-import { ModelSelectorComponent } from "./components/model-selector.js";
+import { ModelSelectorComponent, providerDisplayName } from "./components/model-selector.js";
 import { OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { ProviderManagerComponent } from "./components/provider-manager.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
@@ -89,6 +90,7 @@ import { ToolExecutionComponent } from "./components/tool-execution.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
+import { ContextualTips } from "../../core/contextual-tips.js";
 import { type SlashCommandContext, dispatchSlashCommand, getAppKeyDisplay } from "./slash-command-handlers.js";
 import { handleAgentEvent } from "./controllers/chat-controller.js";
 import { createExtensionUIContext as buildExtensionUIContext } from "./controllers/extension-ui-controller.js";
@@ -157,11 +159,16 @@ export interface InteractiveModeOptions {
 }
 
 export class InteractiveMode {
+	// Cap rendered chat components to prevent unbounded memory/CPU growth.
+	// Only render-components are removed — session transcript stays on disk.
+	private static readonly MAX_CHAT_COMPONENTS = 100;
+
 	private session: AgentSession;
 	private ui: TUI;
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private pinnedMessageContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private autocompleteProvider: CombinedAutocompleteProvider | undefined;
@@ -208,6 +215,9 @@ export class InteractiveMode {
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
+
+	// Contextual tips — session-scoped, non-intrusive hints
+	private contextualTips = new ContextualTips();
 
 	// Track current bash execution component
 	private bashComponent: BashExecutionComponent | undefined = undefined;
@@ -276,6 +286,7 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.pinnedMessageContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
@@ -333,7 +344,7 @@ export class InteractiveMode {
 				return filtered.map((item) => ({
 					value: item.label,
 					label: item.id,
-					description: item.provider,
+					description: providerDisplayName(item.provider),
 				}));
 			};
 		}
@@ -481,6 +492,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
+		this.ui.addChild(this.pinnedMessageContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
@@ -1387,7 +1399,21 @@ export class InteractiveMode {
 	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+
+		// widgetContainerAbove: spacer collapses when pinned content is visible
+		// so there's no extra blank line between pinned output and the editor border.
+		// Use detachChildren() (not clear()) — the extensionWidgetsAbove map owns
+		// disposal; clear() would dispose every mounted widget on every re-render.
+		this.widgetContainerAbove.detachChildren();
+		const pinned = this.pinnedMessageContainer;
+		this.widgetContainerAbove.addChild({
+			render: () => pinned.children.length > 0 ? [] : [""],
+			invalidate: () => {},
+		});
+		for (const component of this.extensionWidgetsAbove.values()) {
+			this.widgetContainerAbove.addChild(component);
+		}
+
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
 	}
@@ -1398,7 +1424,9 @@ export class InteractiveMode {
 		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
-		container.clear();
+		// Detach without disposing — the widgets map owns lifecycle; disposing
+		// here would kill refresh timers and subscriptions on every re-render.
+		container.detachChildren();
 
 		if (widgets.size === 0) {
 			if (spacerWhenEmpty) {
@@ -1622,7 +1650,7 @@ export class InteractiveMode {
 					this.hideExtensionInput();
 					resolve(undefined);
 				},
-				{ tui: this.ui, timeout: opts?.timeout },
+				{ tui: this.ui, timeout: opts?.timeout, secure: opts?.secure },
 			);
 
 			this.editorContainer.clear();
@@ -1761,7 +1789,7 @@ export class InteractiveMode {
 		} else if (type === "warning") {
 			this.showWarning(message);
 		} else {
-			this.showStatus(message);
+			this.showStatus(message, { append: true });
 		}
 	}
 
@@ -2028,12 +2056,13 @@ export class InteractiveMode {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
-	private showStatus(message: string): void {
+	private showStatus(message: string, options?: { append?: boolean }): void {
+		const append = options?.append ?? false;
 		const children = this.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
-		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
+		if (!append && last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
 			this.lastStatusText.setText(theme.fg("dim", message));
 			this.ui.requestRender();
 			return;
@@ -2138,6 +2167,18 @@ export class InteractiveMode {
 				const _exhaustive: never = message;
 			}
 		}
+		this.trimChatHistory();
+	}
+
+	/**
+	 * Remove oldest components when chat exceeds MAX_CHAT_COMPONENTS.
+	 * Only render-components are removed — session data stays in SessionManager.
+	 */
+	private trimChatHistory(): void {
+		while (this.chatContainer.children.length > InteractiveMode.MAX_CHAT_COMPONENTS) {
+			const oldest = this.chatContainer.children[0];
+			this.chatContainer.removeChild(oldest);
+		}
 	}
 
 	/**
@@ -2232,6 +2273,7 @@ export class InteractiveMode {
 		}
 
 		this.pendingTools.clear();
+		this.trimChatHistory();
 		this.ui.requestRender();
 	}
 
@@ -2242,6 +2284,7 @@ export class InteractiveMode {
 			updateFooter: true,
 			populateHistory: true,
 		});
+		this.populatePinnedFromMessages(context.messages);
 
 		// Show compaction info if session was compacted
 		const allEntries = this.sessionManager.getEntries();
@@ -2263,8 +2306,60 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
+		this.pinnedMessageContainer.clear();
 		const context = this.sessionManager.buildSessionContext();
 		this.renderSessionContext(context);
+		// Pinned content NOT re-populated here — the streaming lifecycle in
+		// chat-controller.ts manages the pinned zone during active work.
+		// populatePinnedFromMessages() remains in renderInitialMessages()
+		// for the session-resume case at startup.
+	}
+
+	/**
+	 * After rebuilding chat from messages, pin the last assistant text above the
+	 * editor if tool results would otherwise push it out of the viewport.
+	 */
+	private populatePinnedFromMessages(messages: AgentMessage[]): void {
+		this.pinnedMessageContainer.clear();
+
+		// Walk backwards to find the last assistant message
+		let lastAssistant: AssistantMessage | undefined;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg && "role" in msg && msg.role === "assistant") {
+				lastAssistant = msg as AssistantMessage;
+				break;
+			}
+		}
+		if (!lastAssistant) return;
+
+		// Check if any tool calls follow the last text block
+		const content = lastAssistant.content;
+		let lastTextIndex = -1;
+		let hasToolAfterText = false;
+		for (let i = 0; i < content.length; i++) {
+			if (content[i].type === "text") lastTextIndex = i;
+		}
+		if (lastTextIndex >= 0) {
+			for (let i = lastTextIndex + 1; i < content.length; i++) {
+				if (content[i].type === "toolCall" || content[i].type === "serverToolUse") {
+					hasToolAfterText = true;
+					break;
+				}
+			}
+		}
+		if (!hasToolAfterText || lastTextIndex < 0) return;
+
+		const textBlock = content[lastTextIndex] as { type: "text"; text: string };
+		const text = textBlock.text?.trim();
+		if (!text) return;
+
+		this.pinnedMessageContainer.addChild(
+			new DynamicBorder((str: string) => theme.fg("dim", str), "Latest Output"),
+		);
+		this.pinnedMessageContainer.addChild(
+			new Markdown(text, 1, 0, this.getMarkdownThemeWithSettings()),
+		);
 	}
 
 	// =========================================================================
@@ -2325,6 +2420,21 @@ export class InteractiveMode {
 		if (shutdownBehavior === "stop_ui") {
 			return;
 		}
+
+		// Kill ALL descendant processes to prevent orphans (next-server, pnpm dev, etc.)
+		try {
+			const descendants = listDescendants(process.pid);
+			for (const childPid of descendants) {
+				try { process.kill(childPid, "SIGTERM"); } catch {}
+			}
+			if (descendants.length > 0) {
+				await new Promise(resolve => setTimeout(resolve, 500));
+				for (const childPid of descendants) {
+					try { process.kill(childPid, "SIGKILL"); } catch {}
+				}
+			}
+		} catch {}
+
 		process.exit(0);
 	}
 
@@ -2558,6 +2668,16 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	showTip(message: string): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("dim", `💡 ${message}`), 1, 0));
+		this.ui.requestRender();
+	}
+
+	getContextPercent(): number | undefined {
+		return this.session.getContextUsage()?.percent ?? undefined;
 	}
 
 	showNewVersionNotification(newVersion: string): void {
@@ -3378,6 +3498,11 @@ export class InteractiveMode {
 					done();
 					this.ui.requestRender();
 				},
+				async (provider: string) => {
+					// Enter key → auth setup for selected provider (#3579)
+					done();
+					await this.showLoginDialog(provider);
+				},
 			);
 			return { component, focus: component };
 		});
@@ -3640,6 +3765,9 @@ export class InteractiveMode {
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
+
+		// Reset contextual tips for the new session
+		this.contextualTips.reset();
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
